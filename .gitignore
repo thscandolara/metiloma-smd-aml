@@ -1,0 +1,21 @@
+# --- Dados brutos e grandes (NUNCA versionar) ---
+*.idat
+*.idat.gz
+arquivos_idats/
+data/idats/
+
+# --- Dados sensíveis / identificáveis ---
+*_ORIGINAL.csv
+pdata_pronon.csv
+
+# --- Saídas e cache do R ---
+.Rhistory
+.RData
+.Rproj.user/
+*_cache/
+*_files/
+*.rds
+
+# --- Sistema ---
+.DS_Store
+Thumbs.db

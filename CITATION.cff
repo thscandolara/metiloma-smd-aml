@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "Se usar este material, por favor cite como abaixo."
+title: "Pipeline EPICv2 de metilação de DNA: AML vs MDS"
+type: software
+authors:
+  - family-names: Scandolara
+    given-names: Thalita
+date-released: 2026-07-28
+license: MIT
+repository-code: "https://github.com/thscandolara/metiloma-smd-aml"
+keywords:
+  - DNA methylation
+  - EPICv2
+  - acute myeloid leukemia
+  - myelodysplastic syndrome
+  - epigenetics
+  - DMRcate
+  - sesame

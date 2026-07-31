@@ -1,0 +1,137 @@
+---
+title: "Metilação de DNA (EPICv2) em AML e MDS: pipeline exploratório"
+author: "Thalita Scandolara"
+date: last-modified
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: show
+    number-sections: true
+    embed-resources: true
+execute:
+  warning: false
+  message: false
+bibliography: references.bib
+---
+
+## Introdução
+
+Análise exploratória de metilação de DNA em amostras de medula óssea de pacientes
+com leucemia mieloide aguda (AML) e síndrome mielodisplásica (MDS de alto e baixo
+risco), em array Illumina Infinium MethylationEPIC v2.0 (EPICv2, genoma hg38).
+
+Dado o tamanho amostral pequeno, o objetivo é **caracterizar as fontes de variação
+e descrever padrões**, não construir classificadores. Estudos de referência com
+doenças semelhantes mostram que, nesse contexto, a separação global não-supervisionada
+costuma ser fraca [@cabezon2021], o que motiva um enquadramento exploratório e a
+atenção a confundidores (composição celular / lote).
+
+O fluxo espelha o tutorial EPICv2 do Clark-lab (baseado em `sesame` + `DMRcate`),
+adaptado ao delineamento AML vs MDS.
+
+## Pacotes
+
+```{r pacotes}
+#| eval: false
+library(sesame)      # pré-processamento EPICv2 (openSesame, pOOBAH, colapso)
+library(limma)       # DMPs
+library(DMRcate)     # DMRs
+library(IlluminaHumanMethylationEPICv2manifest)
+library(IlluminaHumanMethylationEPICv2anno.20a1.hg38)
+library(ggplot2)
+sesameDataCache()    # baixa dados de apoio do sesame (uma vez)
+```
+
+## Leitura dos dados e metadados
+
+```{r leitura}
+#| eval: false
+targets <- read.csv("data/pdata_pronon.csv")
+# merge MDS_VERY_HIGH -> MDS_HIGH; fator de grupo
+targets$Group <- factor(sub("MDS_VERY_HIGH", "MDS_HIGH", targets$Sample_type),
+                        levels = c("AML", "MDS_HIGH", "MDS_LOW"))
+
+idat_dir <- "data/idats"
+betas <- openSesame(idat_dir, prep = "QCDPB", func = getBetas)  # noob+dyebias+pOOBAH
+```
+
+## Controle de qualidade
+
+Métricas por amostra (`sesameQC`), inspeção de SNPs de controle para detectar
+trocas de amostra, e detecção pOOBAH para mascarar sondas/amostras de baixa qualidade.
+
+```{r qc}
+#| eval: false
+qc <- openSesame(idat_dir, prep = "QCDPB", func = sesameQC_calcStats)
+# fração de sondas mascaradas por amostra -> critério de exclusão
+# sesameQC_plotHeatSNPs(sdfs)  # trocas de amostra
+```
+
+## Filtro de sondas
+
+Remoção de sondas com SNP, cross-reactive (evidência do manifesto EPICv2) e
+cromossomos sexuais — via `DMRcate::rmSNPandCH`. Colapso de réplicas EPICv2
+resolvido dentro do `cpg.annotate` (`epicv2Filter = "mean"`).
+
+```{r filtro}
+#| eval: false
+Ms <- BetaValueToMValue(betas)
+Ms <- Ms[complete.cases(Ms), ]
+Ms.flt <- rmSNPandCH(Ms, rmcrosshyb = TRUE)   # SNP + cross-hyb (+ XY)
+```
+
+## Fontes de variação: efeito de lote e composição celular
+
+Passo crítico para dados de medula óssea: verificar se o maior eixo de variação
+(PC1) é biológico (grupo) ou técnico/celular (chip, blastos). Se um confundidor
+dominar, ele é modelado (covariável explícita ou fatores latentes via SVA/RUVm).
+
+```{r pca-confounders}
+#| eval: false
+pcs <- prcomp(t(Ms.flt))$x[, 1:5]
+# associar cada PC a Group, Sex, Blast_pct, Cellularity, Sentrix_ID (lote)...
+```
+
+## Análise diferencial por sonda (DMPs)
+
+Modelo único `~ 0 + Group + Sex` (sexo registrado como covariável), com contrastes
+pareados extraídos do mesmo ajuste (mais poder que subdividir os dados).
+
+```{r dmps}
+#| eval: false
+design <- model.matrix(~ 0 + Group + Sex, data = targets)
+colnames(design) <- make.names(colnames(design))
+contrasts <- makeContrasts(
+  AMLvsHIGH = GroupAML - GroupMDS_HIGH,
+  AMLvsLOW  = GroupAML - GroupMDS_LOW,
+  HIGHvsLOW = GroupMDS_HIGH - GroupMDS_LOW,
+  levels = design)
+fit <- eBayes(contrasts.fit(lmFit(Ms.flt, design), contrasts))
+summary(decideTests(fit))
+```
+
+## Análise diferencial por região (DMRs)
+
+```{r dmrs}
+#| eval: false
+ann <- cpg.annotate("array", Ms.flt, what = "M", arraytype = "EPICv2",
+                    epicv2Filter = "mean", analysis.type = "differential",
+                    design = design, contrasts = TRUE, cont.matrix = contrasts,
+                    coef = "AMLvsHIGH", fdr = 0.05)
+dmrs <- extractRanges(dmrcate(ann, lambda = 1000, C = 2), genome = "hg38")
+```
+
+## Interpretação e limitações
+
+Com n pequeno, a ausência de DMPs genome-wide após correção é esperada e deve ser
+reportada como limitação de poder, não como ausência de biologia [@cabezon2021].
+A caracterização das fontes de variação e a abordagem regional (DMRcate) são os
+resultados exploratórios centrais.
+
+## Informação da sessão
+
+```{r sessioninfo}
+#| eval: false
+sessionInfo()
+```
