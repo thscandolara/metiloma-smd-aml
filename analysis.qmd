@@ -9,129 +9,192 @@ format:
     code-fold: show
     number-sections: true
     embed-resources: true
+    fig-width: 9
+    fig-height: 6
 execute:
   warning: false
   message: false
-bibliography: references.bib
+  cache: true
 ---
 
 ## Introdução
 
-Análise exploratória de metilação de DNA em amostras de medula óssea de pacientes
-com leucemia mieloide aguda (AML) e síndrome mielodisplásica (MDS de alto e baixo
-risco), em array Illumina Infinium MethylationEPIC v2.0 (EPICv2, genoma hg38).
+Análise exploratória de metilação de DNA em medula óssea de pacientes com AML e MDS
+(alto e baixo risco), em array Illumina EPICv2 (hg38). Dado o n pequeno, o foco é
+caracterizar as fontes de variação e o controle de qualidade, não classificadores.
 
-Dado o tamanho amostral pequeno, o objetivo é **caracterizar as fontes de variação
-e descrever padrões**, não construir classificadores. Estudos de referência com
-doenças semelhantes mostram que, nesse contexto, a separação global não-supervisionada
-costuma ser fraca [@cabezon2021], o que motiva um enquadramento exploratório e a
-atenção a confundidores (composição celular / lote).
+## Setup e pacotes
 
-O fluxo espelha o tutorial EPICv2 do Clark-lab (baseado em `sesame` + `DMRcate`),
-adaptado ao delineamento AML vs MDS.
-
-## Pacotes
-
-```{r pacotes}
-#| eval: false
-library(sesame)      # pré-processamento EPICv2 (openSesame, pOOBAH, colapso)
-library(limma)       # DMPs
-library(DMRcate)     # DMRs
+```{r setup}
+library(sesame)
+library(limma)
+library(DMRcate)
+library(ggplot2)
 library(IlluminaHumanMethylationEPICv2manifest)
 library(IlluminaHumanMethylationEPICv2anno.20a1.hg38)
-library(ggplot2)
-sesameDataCache()    # baixa dados de apoio do sesame (uma vez)
+
+# Caminhos (ajuste para o seu computador). Nao use setwd() em .qmd.
+idat_dir   <- "~/Documents/Metiloma_PRONON/arquivos_idats"
+pdata_path <- file.path(idat_dir, "pdata_pronon.csv")
+
+pal <- c(AML = "#E4572E", MDS_HIGH = "#2E9E4F", MDS_LOW = "#3E7CB1")
 ```
 
-## Leitura dos dados e metadados
+```{r cache-sesame}
+sesameDataCache()   # baixa dados de apoio (uma vez)
+```
 
-```{r leitura}
-#| eval: false
-targets <- read.csv("data/pdata_pronon.csv")
-# merge MDS_VERY_HIGH -> MDS_HIGH; fator de grupo
+## Metadados
+
+```{r metadados}
+targets <- read.csv(pdata_path)
 targets$Group <- factor(sub("MDS_VERY_HIGH", "MDS_HIGH", targets$Sample_type),
                         levels = c("AML", "MDS_HIGH", "MDS_LOW"))
-
-idat_dir <- "data/idats"
-betas <- openSesame(idat_dir, prep = "QCDPB", func = getBetas)  # noob+dyebias+pOOBAH
+table(targets$Group)
 ```
 
-## Controle de qualidade
+## Leitura e pré-processamento (sesame)
 
-Métricas por amostra (`sesameQC`), inspeção de SNPs de controle para detectar
-trocas de amostra, e detecção pOOBAH para mascarar sondas/amostras de baixa qualidade.
+Processa os idats **uma vez** em objetos `SigDF` (noob + dye bias + pOOBAH), e
+deriva betas e QC a partir dos mesmos objetos (evita reprocessar a cada render).
 
-```{r qc}
-#| eval: false
-qc <- openSesame(idat_dir, prep = "QCDPB", func = sesameQC_calcStats)
-# fração de sondas mascaradas por amostra -> critério de exclusão
-# sesameQC_plotHeatSNPs(sdfs)  # trocas de amostra
+```{r read-sdf}
+sdfs      <- openSesame(idat_dir, prep = "QCDPB", func = NULL)   # lista de SigDF
+betas_all <- do.call(cbind, lapply(sdfs, getBetas))              # betas (com NA do pOOBAH)
+dim(betas_all)
 ```
 
-## Filtro de sondas
+## Controle de qualidade — AMOSTRAS
 
-Remoção de sondas com SNP, cross-reactive (evidência do manifesto EPICv2) e
-cromossomos sexuais — via `DMRcate::rmSNPandCH`. Colapso de réplicas EPICv2
-resolvido dentro do `cpg.annotate` (`epicv2Filter = "mean"`).
+O pOOBAH mascara (vira `NA`) sondas que falham na detecção, por amostra. A **fração
+detectada por amostra** é a métrica de QC de amostra (análoga ao mean detection
+p-value do minfi). Métricas oficiais completas vêm do `sesameQC_calcStats`.
 
-```{r filtro}
-#| eval: false
-Ms <- BetaValueToMValue(betas)
-Ms <- Ms[complete.cases(Ms), ]
-Ms.flt <- rmSNPandCH(Ms, rmcrosshyb = TRUE)   # SNP + cross-hyb (+ XY)
+```{r qc-amostra-calc}
+# métricas oficiais do sesame (detecção, intensidade, dye bias, conversão...)
+qcs   <- lapply(sdfs, sesameQC_calcStats)
+qc_df <- do.call(rbind, lapply(qcs, as.data.frame))
+qc_df$Barcode <- names(sdfs)
+
+# tabela de QC de amostra (detecção derivada dos betas, robusta para plotar)
+sampleqc <- data.frame(
+  Barcode   = colnames(betas_all),
+  Detection = 1 - colMeans(is.na(betas_all))
+)
+sampleqc$Group <- targets$Group[match(sampleqc$Barcode, targets$Barcode)]
 ```
 
-## Fontes de variação: efeito de lote e composição celular
+### Gráfico: detecção por amostra
 
-Passo crítico para dados de medula óssea: verificar se o maior eixo de variação
-(PC1) é biológico (grupo) ou técnico/celular (chip, blastos). Se um confundidor
-dominar, ele é modelado (covariável explícita ou fatores latentes via SVA/RUVm).
+```{r qc-amostra-plot-det}
+#| fig-cap: "Fração de sondas detectadas por amostra (pOOBAH). Linha = corte de exclusão."
+cutoff <- 0.80   # manter detecção >= 80% (equivale a <=20% mascarado)
+ggplot(sampleqc, aes(reorder(Barcode, Detection), Detection, fill = Group)) +
+  geom_col() +
+  geom_hline(yintercept = cutoff, linetype = "dashed", color = "red") +
+  scale_fill_manual(values = pal) +
+  coord_flip() +
+  labs(x = NULL, y = "Fração detectada", title = "QC de amostra: detecção (pOOBAH)") +
+  theme_minimal(base_size = 9)
+```
+
+### Gráfico: QC oficial do sesame
+
+```{r qc-amostra-plot-sesame}
+#| fig-cap: "Barras de QC do sesame por amostra."
+sesameQC_plotBar(qcs)
+```
+
+### Exclusão de amostras ruins
+
+```{r qc-amostra-filtro}
+boas <- sampleqc$Barcode[sampleqc$Detection >= cutoff]
+ruins <- setdiff(sampleqc$Barcode, boas)
+cat("Excluídas (", length(ruins), "):", paste(ruins, collapse = ", "), "\n")
+
+betas_qc   <- betas_all[, boas]
+targetsFlt <- targets[match(boas, targets$Barcode), ]
+table(targetsFlt$Group)   # confira o balanço de grupo após excluir
+```
+
+## Controle de qualidade — SONDAS
+
+Depois de tirar amostra ruim, filtra sonda pela fração de `NA` **nas amostras boas**
+(mantém sondas detectadas em ≥95%). Nada de `complete.cases` (jogaria fora sonda que
+falha em uma única amostra).
+
+### Gráfico: distribuição de falha por sonda
+
+```{r qc-sonda-plot}
+#| fig-cap: "Fração de amostras em que cada sonda falha. Linha = corte (5%)."
+frac_na_sonda <- rowMeans(is.na(betas_qc))
+ggplot(data.frame(f = frac_na_sonda), aes(f)) +
+  geom_histogram(bins = 60, fill = "grey40") +
+  geom_vline(xintercept = 0.05, linetype = "dashed", color = "red") +
+  labs(x = "Fração de amostras com falha", y = "nº de sondas",
+       title = "QC de sonda: falha de detecção") +
+  theme_minimal()
+```
+
+```{r qc-sonda-filtro}
+betas_flt <- betas_qc[frac_na_sonda <= 0.05, ]
+cat("Sondas retidas:", nrow(betas_flt), "de", nrow(betas_qc), "\n")
+```
+
+## Survey pós-normalização
+
+### Densidade dos betas por grupo
+
+```{r survey-densidade}
+#| fig-cap: "Distribuição de beta por amostra, colorida por grupo."
+d <- do.call(rbind, lapply(colnames(betas_flt), function(s){
+  x <- betas_flt[, s]; x <- x[is.finite(x)]
+  data.frame(beta = x, Group = targetsFlt$Group[match(s, targetsFlt$Barcode)], Sample = s)
+}))
+ggplot(d, aes(beta, group = Sample, color = Group)) +
+  geom_density(linewidth = 0.3) + scale_color_manual(values = pal) +
+  labs(x = "Beta", y = "Densidade") + theme_minimal()
+```
+
+### MDS / PCA (fontes de variação)
+
+```{r survey-mds}
+#| fig-cap: "MDS dos M-values, colorido por grupo."
+Ms <- minfi::logit2(betas_flt)
+Ms <- Ms[complete.cases(Ms), ]           # complete.cases SÓ aqui (prcomp/MDS não aceita NA)
+plotMDS(Ms, top = 1000, gene.selection = "common",
+        col = pal[targetsFlt$Group], pch = 19)
+legend("topright", legend = names(pal), text.col = pal, bty = "n")
+```
+
+### PCA × variáveis clínicas (efeito de lote / composição)
 
 ```{r pca-confounders}
-#| eval: false
-pcs <- prcomp(t(Ms.flt))$x[, 1:5]
-# associar cada PC a Group, Sex, Blast_pct, Cellularity, Sentrix_ID (lote)...
+pcs  <- prcomp(t(Ms))$x[, 1:5]
+vars_num <- c("Age","Blast_pct","Hemoglobin","Platelets")
+vars_cat <- c("Group","Sex","Cellularity","Sentrix_ID")
+r2 <- function(v, fac){ x <- targetsFlt[[v]]; if(fac) x <- factor(x); ok <- !is.na(x)
+  sapply(1:5, function(p) summary(lm(pcs[ok,p] ~ x[ok]))$r.squared) }
+res <- rbind(t(sapply(vars_num, r2, fac=FALSE)), t(sapply(vars_cat, r2, fac=TRUE)))
+colnames(res) <- paste0("PC", 1:5); round(res, 2)
 ```
 
-## Análise diferencial por sonda (DMPs)
+## Filtro final e análise diferencial
 
-Modelo único `~ 0 + Group + Sex` (sexo registrado como covariável), com contrastes
-pareados extraídos do mesmo ajuste (mais poder que subdividir os dados).
-
-```{r dmps}
+```{r prep-diff}
 #| eval: false
-design <- model.matrix(~ 0 + Group + Sex, data = targets)
+Ms.flt <- rmSNPandCH(minfi::logit2(betas_flt), rmcrosshyb = TRUE)  # SNP + cross-hyb + XY
+design <- model.matrix(~ 0 + Group + Sex, data = targetsFlt)
 colnames(design) <- make.names(colnames(design))
-contrasts <- makeContrasts(
-  AMLvsHIGH = GroupAML - GroupMDS_HIGH,
-  AMLvsLOW  = GroupAML - GroupMDS_LOW,
-  HIGHvsLOW = GroupMDS_HIGH - GroupMDS_LOW,
-  levels = design)
-fit <- eBayes(contrasts.fit(lmFit(Ms.flt, design), contrasts))
+cont <- makeContrasts(AMLvsHIGH = GroupAML - GroupMDS_HIGH,
+                      AMLvsLOW  = GroupAML - GroupMDS_LOW,
+                      HIGHvsLOW = GroupMDS_HIGH - GroupMDS_LOW, levels = design)
+fit <- eBayes(contrasts.fit(lmFit(Ms.flt, design), cont))
 summary(decideTests(fit))
 ```
-
-## Análise diferencial por região (DMRs)
-
-```{r dmrs}
-#| eval: false
-ann <- cpg.annotate("array", Ms.flt, what = "M", arraytype = "EPICv2",
-                    epicv2Filter = "mean", analysis.type = "differential",
-                    design = design, contrasts = TRUE, cont.matrix = contrasts,
-                    coef = "AMLvsHIGH", fdr = 0.05)
-dmrs <- extractRanges(dmrcate(ann, lambda = 1000, C = 2), genome = "hg38")
-```
-
-## Interpretação e limitações
-
-Com n pequeno, a ausência de DMPs genome-wide após correção é esperada e deve ser
-reportada como limitação de poder, não como ausência de biologia [@cabezon2021].
-A caracterização das fontes de variação e a abordagem regional (DMRcate) são os
-resultados exploratórios centrais.
 
 ## Informação da sessão
 
 ```{r sessioninfo}
-#| eval: false
 sessionInfo()
 ```
