@@ -3,7 +3,7 @@
 Pipeline reprodutível de análise de metilação de DNA (Illumina Infinium MethylationEPIC v2.0, EPICv2, hg38) comparando **leucemia mieloide aguda (AML)** e **neoplasia mielodisplásica (MDS)** de alto e baixo risco.
 
 ## Objetivo
-Explorar diferenças de metilação (DMPs e DMRs) entre AML e MDS. Dado o tamanho amostral pequeno (n≈37), o estudo é **exploratório**: o foco é caracterizar as fontes de variação e descrever padrões, não construir classificadores.
+Explorar diferenças de metilação (DMPs e DMRs) entre AML e MDS. Dado o tamanho amostral pequeno (n≈43), o estudo é **exploratório**: o foco é caracterizar as fontes de variação e descrever padrões, não construir classificadores.
 
 ## Pipeline (visão geral)
 `sesame::openSesame` (noob + correção de dye bias + detecção pOOBAH) → QC (SNPs de controle, densidade, MDS) → filtro de sondas (detecção, SNP, cross-reactive, chrX/Y) → colapso de réplicas EPICv2 → **checagem de efeito de lote e composição celular (PCA × variáveis)** → `limma` (DMPs, contrastes pareados) → `DMRcate` (DMRs).
