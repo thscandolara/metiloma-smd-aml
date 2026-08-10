@@ -29,7 +29,9 @@ Contrastes de interesse: **AML vs MDS (alto + baixo)** e **MDS alto vs MDS baixo
 
 ## Configuração e funções auxiliares
 
+
 ```{r setup}
+
 library(sesame)
 library(limma)
 library(DMRcate)
@@ -37,35 +39,146 @@ library(ggplot2)
 library(IlluminaHumanMethylationEPICv2manifest)
 library(IlluminaHumanMethylationEPICv2anno.20a1.hg38)
 
-# --- Caminhos (AJUSTE para o seu servidor). Nunca use setwd() em .qmd. ---
-idat_dir   <- "~/Documents/Metiloma_PRONON/arquivos_idats"
+# ============================================================
+# CAMINHOS
+# ============================================================
+# O Quarto pode renderizar a partir de outro working directory.
+# Por isso, todos os caminhos de entrada/saída são definidos
+# explicitamente a partir da raiz do projeto.
+#
+# Não usar setwd() em .qmd.
+
+project_dir <- path.expand("~/Documents/Metiloma_PRONON")
+
+# Dados
+idat_dir   <- file.path(project_dir, "arquivos_idats")
 pdata_path <- file.path(idat_dir, "pdata_pronon.csv")
 
-# --- Pastas de saída (boas práticas de bioinformática) ---
-dir.create("output",          showWarnings = FALSE)
-dir.create("output/figuras",  showWarnings = FALSE)
-dir.create("output/tabelas",  showWarnings = FALSE)
-dir.create("results",         showWarnings = FALSE)  # objetos .rds (fora do git)
+# Saídas
+output_dir  <- file.path(project_dir, "output")
+fig_dir     <- file.path(output_dir, "figuras")
+tab_dir     <- file.path(output_dir, "tabelas")
+results_dir <- file.path(project_dir, "results")
 
-pal <- c(AML = "#E4572E", MDS_HIGH = "#2E9E4F", MDS_LOW = "#3E7CB1")
-pal_doenca <- c(AML = "#E4572E", MDS = "#2E7DA1")
 
-# Salva uma figura (png + pdf) e também a exibe no HTML
+# ============================================================
+# CRIAÇÃO DAS PASTAS
+# ============================================================
+
+dir.create(
+  fig_dir,
+  showWarnings = FALSE,
+  recursive = TRUE
+)
+
+dir.create(
+  tab_dir,
+  showWarnings = FALSE,
+  recursive = TRUE
+)
+
+dir.create(
+  results_dir,
+  showWarnings = FALSE,
+  recursive = TRUE
+)
+
+
+# ============================================================
+# PALETAS
+# ============================================================
+
+pal <- c(
+  AML      = "#E4572E",
+  MDS_HIGH = "#2E9E4F",
+  MDS_LOW  = "#3E7CB1"
+)
+
+pal_doenca <- c(
+  AML = "#E4572E",
+  MDS = "#2E7DA1"
+)
+
+
+# ============================================================
+# FUNÇÃO PARA SALVAR FIGURAS
+# ============================================================
+# Salva PNG e PDF no diretório output/figuras
+# e também exibe a figura no HTML.
+
 salvar_fig <- function(plot, nome, w = 9, h = 6) {
-  ggsave(file.path("output/figuras", paste0(nome, ".png")), plot, width = w, height = h, dpi = 300)
-  ggsave(file.path("output/figuras", paste0(nome, ".pdf")), plot, width = w, height = h)
+  
+  ggsave(
+    filename = file.path(
+      fig_dir,
+      paste0(nome, ".png")
+    ),
+    plot = plot,
+    width = w,
+    height = h,
+    dpi = 300
+  )
+  
+  ggsave(
+    filename = file.path(
+      fig_dir,
+      paste0(nome, ".pdf")
+    ),
+    plot = plot,
+    width = w,
+    height = h
+  )
+  
   print(plot)
 }
-# Salva uma tabela em CSV
+
+
+# ============================================================
+# FUNÇÃO PARA SALVAR TABELAS
+# ============================================================
+# Salva CSV no diretório output/tabelas.
+
 salvar_tab <- function(df, nome) {
-  write.csv(df, file.path("output/tabelas", paste0(nome, ".csv")), row.names = TRUE)
+  
+  write.csv(
+    df,
+    file = file.path(
+      tab_dir,
+      paste0(nome, ".csv")
+    ),
+    row.names = TRUE
+  )
+  
   invisible(df)
 }
-# Registro do nº de sondas ao longo das filtragens
-contagem_sondas <- data.frame(Etapa = character(), N_sondas = integer())
+
+
+# ============================================================
+# REGISTRO DO NÚMERO DE SONDAS
+# ============================================================
+# Registra o número de sondas ao longo das etapas de filtragem.
+
+contagem_sondas <- data.frame(
+  Etapa = character(),
+  N_sondas = integer()
+)
+
 registrar <- function(etapa, n) {
-  contagem_sondas <<- rbind(contagem_sondas, data.frame(Etapa = etapa, N_sondas = n))
-  message(etapa, ": ", n, " sondas")
+  
+  contagem_sondas <<- base::rbind(
+    contagem_sondas,
+    data.frame(
+      Etapa = etapa,
+      N_sondas = as.integer(n)
+    )
+  )
+  
+message(
+    etapa,
+    ": ",
+    n,
+    " sondas"
+  )
 }
 ```
 
@@ -76,12 +189,13 @@ renderizações lê o pronto. Também guarda os betas SEM normalização, para o
 antes/depois.
 
 ```{r read-sdf}
-sesameDataCache()
-rds <- "results/sdfs_betas.rds"
-if (file.exists(rds)) {
-  obj <- readRDS(rds)
+##sesameDataCache()
+rds <- file.path(project_dir,"results/sdfs_betas.rds")
+obj <- if (file.exists(rds)) readRDS(rds) else NULL
+if (!is.null(obj) && all(c("sdfs","betas_norm","betas_raw","qcs") %in% names(obj))) {
   sdfs <- obj$sdfs; betas_norm <- obj$betas_norm; betas_raw <- obj$betas_raw; qcs <- obj$qcs
 } else {
+  # .rds ausente ou de versao antiga -> (re)processa
   sdfs       <- openSesame(idat_dir, prep = "QCDPB", func = NULL)          # SigDFs normalizados
   betas_norm <- do.call(cbind, lapply(sdfs, getBetas))                     # betas normalizados
   betas_raw  <- openSesame(idat_dir, prep = "",     func = getBetas)       # betas crus (sem norm)
@@ -221,12 +335,45 @@ salvar_fig(g, "03_contagem_sondas")
 
 ```{r mds}
 #| fig-cap: "MDS dos M-values (colapsados), colorido por grupo."
-png("output/figuras/04_mds_grupo.png", width = 900, height = 700, res = 120)
-plotMDS(M_col, top = 1000, gene.selection = "common", col = pal[targetsFlt$Group], pch = 19)
-legend("topright", legend = names(pal), text.col = pal, bty = "n")
+
+png(
+  file.path(fig_dir, "04_mds_grupo.png"),
+  width = 900,
+  height = 700,
+  res = 120
+)
+
+plotMDS(
+  M_col,
+  top = 1000,
+  gene.selection = "common",
+  col = pal[targetsFlt$Group],
+  pch = 19
+)
+
+legend(
+  "topright",
+  legend = names(pal),
+  text.col = pal,
+  bty = "n"
+)
+
 dev.off()
-plotMDS(M_col, top = 1000, gene.selection = "common", col = pal[targetsFlt$Group], pch = 19)
-legend("topright", legend = names(pal), text.col = pal, bty = "n")
+
+plotMDS(
+  M_col,
+  top = 1000,
+  gene.selection = "common",
+  col = pal[targetsFlt$Group],
+  pch = 19
+)
+
+legend(
+  "topright",
+  legend = names(pal),
+  text.col = pal,
+  bty = "n"
+)
 ```
 
 ```{r pca-confundidores}
@@ -362,13 +509,21 @@ salvar_fig(g, "06_proporcao_metilada_por_regiao")
 ```{r dmrs}
 # usa a matriz NÃO colapsada, sem SNP/CH/XY; cpg.annotate colapsa (epicv2Filter="mean")
 M_dmr <- M_auto[is.finite(rowSums(M_auto)), ]
+
+# fdr = corte de CpG que "semeia" as regiões. 0.05 é rigoroso; para uma passada
+# EXPLORATORIA com n pequeno, pode-se elevar (ex.: rodar_dmr("AMLvsMDS", fdr = 0.1)).
 rodar_dmr <- function(coef, fdr = 0.05) {
   ann <- cpg.annotate("array", M_dmr, what = "M", arraytype = "EPICv2",
                       epicv2Filter = "mean", analysis.type = "differential",
                       design = design, contrasts = TRUE, cont.matrix = cont,
                       coef = coef, fdr = fdr)
-  rng <- extractRanges(dmrcate(ann, lambda = 1000, C = 2), genome = "hg38")
-  salvar_tab(as.data.frame(rng), paste0("07_DMRs_", coef))
+  rng <- tryCatch(
+    extractRanges(dmrcate(ann, lambda = 1000, C = 2), genome = "hg38"),
+    error = function(e) {
+      message(coef, " — nenhum DMR (nenhum CpG significativo em fdr=", fdr, ").")
+      GenomicRanges::GRanges()
+    })
+  if (length(rng)) salvar_tab(as.data.frame(rng), paste0("07_DMRs_", coef))
   message(coef, " — DMRs: ", length(rng))
   list(ann = ann, rng = rng)
 }
@@ -381,3 +536,5 @@ dmr_HIGHvsLOW <- rodar_dmr("HIGHvsLOW")
 ```{r sessioninfo}
 sessionInfo()
 ```
+
+
