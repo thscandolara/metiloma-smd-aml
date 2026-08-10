@@ -14,7 +14,6 @@ format:
 execute:
   warning: false
   message: false
-  cache: true
 ---
 
 ## Introdução
@@ -59,8 +58,17 @@ Processa os idats **uma vez** em objetos `SigDF` (noob + dye bias + pOOBAH), e
 deriva betas e QC a partir dos mesmos objetos (evita reprocessar a cada render).
 
 ```{r read-sdf}
-sdfs      <- openSesame(idat_dir, prep = "QCDPB", func = NULL)   # lista de SigDF
-betas_all <- do.call(cbind, lapply(sdfs, getBetas))              # betas (com NA do pOOBAH)
+# Processa os idats UMA vez e guarda em .rds (nao usar cache do knitr: objeto grande demais).
+# Nas proximas vezes, le o pronto -> render rapido. O .rds fica fora do git (.gitignore).
+dir.create("results", showWarnings = FALSE)
+rds <- "results/sdfs_betas.rds"
+if (file.exists(rds)) {
+  obj <- readRDS(rds); sdfs <- obj$sdfs; betas_all <- obj$betas
+} else {
+  sdfs      <- openSesame(idat_dir, prep = "QCDPB", func = NULL)   # lista de SigDF
+  betas_all <- do.call(cbind, lapply(sdfs, getBetas))             # betas (com NA do pOOBAH)
+  saveRDS(list(sdfs = sdfs, betas = betas_all), rds)
+}
 dim(betas_all)
 ```
 
