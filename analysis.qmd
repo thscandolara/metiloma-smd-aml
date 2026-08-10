@@ -29,9 +29,7 @@ Contrastes de interesse: **AML vs MDS (alto + baixo)** e **MDS alto vs MDS baixo
 
 ## Configuração e funções auxiliares
 
-
 ```{r setup}
-
 library(sesame)
 library(limma)
 library(DMRcate)
@@ -39,146 +37,35 @@ library(ggplot2)
 library(IlluminaHumanMethylationEPICv2manifest)
 library(IlluminaHumanMethylationEPICv2anno.20a1.hg38)
 
-# ============================================================
-# CAMINHOS
-# ============================================================
-# O Quarto pode renderizar a partir de outro working directory.
-# Por isso, todos os caminhos de entrada/saída são definidos
-# explicitamente a partir da raiz do projeto.
-#
-# Não usar setwd() em .qmd.
-
-project_dir <- path.expand("~/Documents/Metiloma_PRONON")
-
-# Dados
-idat_dir   <- file.path(project_dir, "arquivos_idats")
+# --- Caminhos (AJUSTE para o seu servidor). Nunca use setwd() em .qmd. ---
+idat_dir   <- "~/Documents/Metiloma_PRONON/arquivos_idats"
 pdata_path <- file.path(idat_dir, "pdata_pronon.csv")
 
-# Saídas
-output_dir  <- file.path(project_dir, "output")
-fig_dir     <- file.path(output_dir, "figuras")
-tab_dir     <- file.path(output_dir, "tabelas")
-results_dir <- file.path(project_dir, "results")
+# --- Pastas de saída (boas práticas de bioinformática) ---
+dir.create("output",          showWarnings = FALSE)
+dir.create("output/figuras",  showWarnings = FALSE)
+dir.create("output/tabelas",  showWarnings = FALSE)
+dir.create("results",         showWarnings = FALSE)  # objetos .rds (fora do git)
 
+pal <- c(AML = "#E4572E", MDS_HIGH = "#2E9E4F", MDS_LOW = "#3E7CB1")
+pal_doenca <- c(AML = "#E4572E", MDS = "#2E7DA1")
 
-# ============================================================
-# CRIAÇÃO DAS PASTAS
-# ============================================================
-
-dir.create(
-  fig_dir,
-  showWarnings = FALSE,
-  recursive = TRUE
-)
-
-dir.create(
-  tab_dir,
-  showWarnings = FALSE,
-  recursive = TRUE
-)
-
-dir.create(
-  results_dir,
-  showWarnings = FALSE,
-  recursive = TRUE
-)
-
-
-# ============================================================
-# PALETAS
-# ============================================================
-
-pal <- c(
-  AML      = "#E4572E",
-  MDS_HIGH = "#2E9E4F",
-  MDS_LOW  = "#3E7CB1"
-)
-
-pal_doenca <- c(
-  AML = "#E4572E",
-  MDS = "#2E7DA1"
-)
-
-
-# ============================================================
-# FUNÇÃO PARA SALVAR FIGURAS
-# ============================================================
-# Salva PNG e PDF no diretório output/figuras
-# e também exibe a figura no HTML.
-
+# Salva uma figura (png + pdf) e também a exibe no HTML
 salvar_fig <- function(plot, nome, w = 9, h = 6) {
-  
-  ggsave(
-    filename = file.path(
-      fig_dir,
-      paste0(nome, ".png")
-    ),
-    plot = plot,
-    width = w,
-    height = h,
-    dpi = 300
-  )
-  
-  ggsave(
-    filename = file.path(
-      fig_dir,
-      paste0(nome, ".pdf")
-    ),
-    plot = plot,
-    width = w,
-    height = h
-  )
-  
+  ggsave(file.path("output/figuras", paste0(nome, ".png")), plot, width = w, height = h, dpi = 300)
+  ggsave(file.path("output/figuras", paste0(nome, ".pdf")), plot, width = w, height = h)
   print(plot)
 }
-
-
-# ============================================================
-# FUNÇÃO PARA SALVAR TABELAS
-# ============================================================
-# Salva CSV no diretório output/tabelas.
-
+# Salva uma tabela em CSV
 salvar_tab <- function(df, nome) {
-  
-  write.csv(
-    df,
-    file = file.path(
-      tab_dir,
-      paste0(nome, ".csv")
-    ),
-    row.names = TRUE
-  )
-  
+  write.csv(df, file.path("output/tabelas", paste0(nome, ".csv")), row.names = TRUE)
   invisible(df)
 }
-
-
-# ============================================================
-# REGISTRO DO NÚMERO DE SONDAS
-# ============================================================
-# Registra o número de sondas ao longo das etapas de filtragem.
-
-contagem_sondas <- data.frame(
-  Etapa = character(),
-  N_sondas = integer()
-)
-
+# Registro do nº de sondas ao longo das filtragens
+contagem_sondas <- data.frame(Etapa = character(), N_sondas = integer())
 registrar <- function(etapa, n) {
-  
-  contagem_sondas <<- base::rbind(
-    contagem_sondas,
-    data.frame(
-      Etapa = etapa,
-      N_sondas = as.integer(n)
-    )
-  )
-  
-message(
-    etapa,
-    ": ",
-    n,
-    " sondas"
-  )
+  contagem_sondas <<- base::rbind(contagem_sondas, data.frame(Etapa = etapa, N_sondas = as.integer(n)))
+  message(etapa, ": ", n, " sondas")
 }
 ```
 
@@ -189,8 +76,8 @@ renderizações lê o pronto. Também guarda os betas SEM normalização, para o
 antes/depois.
 
 ```{r read-sdf}
-##sesameDataCache()
-rds <- file.path(project_dir,"results/sdfs_betas.rds")
+sesameDataCache()
+rds <- "results/sdfs_betas.rds"
 obj <- if (file.exists(rds)) readRDS(rds) else NULL
 if (!is.null(obj) && all(c("sdfs","betas_norm","betas_raw","qcs") %in% names(obj))) {
   sdfs <- obj$sdfs; betas_norm <- obj$betas_norm; betas_raw <- obj$betas_raw; qcs <- obj$qcs
@@ -248,8 +135,19 @@ message("Amostras excluídas (", length(ruins), "): ", paste(ruins, collapse = "
 betas_qc   <- betas_norm[, boas]
 raw_qc     <- betas_raw[, boas]
 targetsFlt <- targets[match(boas, targets$Barcode), ]
-targetsFlt$Sentrix_ID <- factor(targetsFlt$Sentrix_ID)   # lote = chip
-targetsFlt$Sex        <- factor(targetsFlt$Sex)
+
+# --- Remoção MANUAL de outliers (densidade aberrante / PCA). Edite os IDs. ---
+# 26 = MDS_LOW com densidade aberrante + extremo no PC1 (QC); 12 = AML extremo no PC2.
+ids_outliers <- c(26, 12)
+bc_out <- targetsFlt$Barcode[targetsFlt$Sample_ID %in% ids_outliers]
+if (length(bc_out)) {
+  betas_qc   <- betas_qc[,   !(colnames(betas_qc)   %in% bc_out)]
+  raw_qc     <- raw_qc[,     !(colnames(raw_qc)     %in% bc_out)]
+  targetsFlt <- targetsFlt[match(colnames(betas_qc), targetsFlt$Barcode), ]
+  message("Outliers removidos (IDs): ", paste(ids_outliers, collapse = ", "))
+}
+targetsFlt$Sentrix_ID <- droplevels(factor(targetsFlt$Sentrix_ID))   # lote = chip
+targetsFlt$Sex        <- droplevels(factor(targetsFlt$Sex))
 salvar_tab(as.data.frame(table(targetsFlt$Group)), "01_n_por_grupo_pos_exclusao")
 table(targetsFlt$Group)
 ```
@@ -335,45 +233,12 @@ salvar_fig(g, "03_contagem_sondas")
 
 ```{r mds}
 #| fig-cap: "MDS dos M-values (colapsados), colorido por grupo."
-
-png(
-  file.path(fig_dir, "04_mds_grupo.png"),
-  width = 900,
-  height = 700,
-  res = 120
-)
-
-plotMDS(
-  M_col,
-  top = 1000,
-  gene.selection = "common",
-  col = pal[targetsFlt$Group],
-  pch = 19
-)
-
-legend(
-  "topright",
-  legend = names(pal),
-  text.col = pal,
-  bty = "n"
-)
-
+png("output/figuras/04_mds_grupo.png", width = 900, height = 700, res = 120)
+plotMDS(M_col, top = 1000, gene.selection = "common", col = pal[targetsFlt$Group], pch = 19)
+legend("topright", legend = names(pal), text.col = pal, bty = "n")
 dev.off()
-
-plotMDS(
-  M_col,
-  top = 1000,
-  gene.selection = "common",
-  col = pal[targetsFlt$Group],
-  pch = 19
-)
-
-legend(
-  "topright",
-  legend = names(pal),
-  text.col = pal,
-  bty = "n"
-)
+plotMDS(M_col, top = 1000, gene.selection = "common", col = pal[targetsFlt$Group], pch = 19)
+legend("topright", legend = names(pal), text.col = pal, bty = "n")
 ```
 
 ```{r pca-confundidores}
@@ -408,6 +273,7 @@ stopifnot(all(colnames(M_col) == targetsFlt$Barcode))
 
 cont <- makeContrasts(
   AMLvsMDS  = GrupoAML - (GrupoMDS_HIGH + GrupoMDS_LOW) / 2,  # AML vs MDS (alto+baixo)
+  AMLvsLOW  = GrupoAML - GrupoMDS_LOW,                        # AML vs MDS baixo (mais contrastante)
   HIGHvsLOW = GrupoMDS_HIGH - GrupoMDS_LOW,                   # MDS alto vs baixo
   levels = design)
 cont
@@ -436,6 +302,7 @@ extrair_dmp <- function(coef) {
   tt
 }
 dmp_AMLvsMDS  <- extrair_dmp("AMLvsMDS")
+dmp_AMLvsLOW  <- extrair_dmp("AMLvsLOW")
 dmp_HIGHvsLOW <- extrair_dmp("HIGHvsLOW")
 ```
 
@@ -449,59 +316,163 @@ volcano <- function(tt, titulo) {
     labs(x = "logFC (M-value)", y = "-log10(P)", title = titulo, color = NULL) +
     theme_minimal()
 }
-g1 <- volcano(dmp_AMLvsMDS,  "AML vs MDS")
-g2 <- volcano(dmp_HIGHvsLOW, "MDS alto vs baixo")
-salvar_fig(g1, "05_volcano_AMLvsMDS"); salvar_fig(g2, "05_volcano_HIGHvsLOW")
+salvar_fig(volcano(dmp_AMLvsMDS, "AML vs MDS"),        "05_volcano_AMLvsMDS")
+salvar_fig(volcano(dmp_AMLvsLOW, "AML vs MDS baixo"),  "05_volcano_AMLvsLOW")
+salvar_fig(volcano(dmp_HIGHvsLOW,"MDS alto vs baixo"), "05_volcano_HIGHvsLOW")
 ```
 
-## Proporção de sondas metiladas por região genômica
+## Metilação por região genômica
 
-Para cada região (promotor, 5'UTR, corpo do gene, 3'UTR e — se disponível — enhancer),
-calcula-se a % de sondas metiladas (beta médio do grupo > 0.5) em relação ao total de
-sondas daquela região, separando AML e MDS.
+Duas visões: (i) % de sondas metiladas (beta médio do grupo > 0.5) por região — grupo
+gênico e relação com ilha CpG — em AML vs MDS; (ii) distribuição das regiões no array
+inteiro vs entre os CpGs de maior sinal do estudo (top-1000 de AML vs MDS-baixo), no
+estilo do artigo de referência.
 
-```{r regiao-setup}
-# categoria de região a partir do UCSC_RefGene_Group (primeiro termo)
-grp_gene <- sub(";.*$", "", annEPIC$UCSC_RefGene_Group)
-regiao <- rep(NA_character_, length(grp_gene)); names(regiao) <- sub("_.*$","",rownames(annEPIC))
-regiao[grp_gene %in% c("TSS200","TSS1500","1stExon")] <- "Promotor"
-regiao[grp_gene == "5'UTR"] <- "5'UTR"
-regiao[grp_gene == "Body"]  <- "Corpo do gene"
-regiao[grp_gene == "3'UTR"] <- "3'UTR"
-# enhancer: procura uma coluna de enhancer na anotação (nome varia por versão)
-col_enh <- grep("nhancer", colnames(annEPIC), value = TRUE)
-if (length(col_enh)) {
-  is_enh <- annEPIC[[col_enh[1]]] %in% c("TRUE", TRUE, "Yes", "Y")
-  regiao[is_enh] <- "Enhancer"
-}
+```{r regiao-map}
+betas_final <- betas_col[rownames(M_col), ]                 # betas colapsados (final DMP)
+prefix <- rownames(betas_final)
+idx    <- match(prefix, sub("_.*$", "", rownames(annEPIC))) # 1a ocorrência por CpG
+
+# grupo gênico -> categoria
+gg <- sub(";.*$", "", annEPIC$UCSC_RefGene_Group[idx])
+reg_gene <- rep("Intergênico", length(gg))
+reg_gene[gg %in% c("TSS200","TSS1500","1stExon")] <- "Promotor"
+reg_gene[gg == "5'UTR"]   <- "5'UTR"
+reg_gene[gg %in% c("Body","ExonBnd")] <- "Corpo do gene"
+reg_gene[gg == "3'UTR"]   <- "3'UTR"
+
+# relação com ilha CpG
+reg_ilha <- as.character(annEPIC$Relation_to_Island[idx])
+reg_ilha[is.na(reg_ilha) | reg_ilha == ""] <- "OpenSea"
 ```
 
-```{r regiao-plot}
-#| fig-cap: "Proporção (%) de sondas metiladas (beta médio > 0.5) por região, em AML e MDS."
-betas_final <- betas_col[rownames(M_col), ]        # betas colapsados usados nos DMPs
-reg_cpg <- regiao[rownames(betas_final)]
-prop_metilada <- function(grupo_amostras) {
-  mb <- rowMeans(betas_final[, grupo_amostras, drop = FALSE], na.rm = TRUE)
-  met <- mb > 0.5
-  tapply(met, reg_cpg, function(x) 100 * mean(x, na.rm = TRUE))
+```{r regiao-metilada}
+#| fig-cap: "Percentual de sondas metiladas (beta médio > 0.5) por região, em AML e MDS."
+grupo_am <- list(AML = targetsFlt$Barcode[targetsFlt$Doenca=="AML"],
+                 MDS = targetsFlt$Barcode[targetsFlt$Doenca=="MDS"])
+pct_met <- function(cat) do.call(rbind, lapply(names(grupo_am), function(d){
+  mb <- rowMeans(betas_final[, grupo_am[[d]], drop=FALSE], na.rm=TRUE)
+  p  <- tapply(mb > 0.5, cat, function(x) 100*mean(x, na.rm=TRUE))
+  data.frame(Regiao=names(p), Pct=as.numeric(p), Doenca=d)
+}))
+
+dfg <- pct_met(reg_gene)
+dfg$Regiao <- factor(dfg$Regiao, levels=c("Promotor","5'UTR","Corpo do gene","3'UTR","Intergênico"))
+salvar_tab(dfg, "06_pct_metilada_grupo_genico")
+g1 <- ggplot(dfg, aes(Regiao, Pct, fill=Doenca)) +
+  geom_col(position=position_dodge()) +
+  geom_text(aes(label=sprintf("%.1f%%",Pct)), position=position_dodge(0.9), vjust=-0.3, size=3) +
+  scale_fill_manual(values=pal_doenca) +
+  labs(x=NULL, y="% de sondas metiladas", fill="Doença",
+       title="Metilação por grupo gênico (AML vs MDS)") + theme_minimal()
+salvar_fig(g1, "06_pct_metilada_grupo_genico")
+
+dfi <- pct_met(reg_ilha)
+dfi$Regiao <- factor(dfi$Regiao, levels=c("Island","N_Shore","S_Shore","N_Shelf","S_Shelf","OpenSea"))
+salvar_tab(dfi, "06_pct_metilada_ilha")
+g2 <- ggplot(dfi, aes(Regiao, Pct, fill=Doenca)) +
+  geom_col(position=position_dodge()) +
+  scale_fill_manual(values=pal_doenca) +
+  labs(x=NULL, y="% de sondas metiladas", fill="Doença",
+       title="Metilação por relação com ilha CpG (AML vs MDS)") +
+  theme_minimal() + theme(axis.text.x=element_text(angle=20, hjust=1))
+salvar_fig(g2, "06_pct_metilada_ilha")
+```
+
+```{r regiao-array-vs-estudo}
+#| fig-cap: "Distribuição das regiões: array (todos os CpGs) vs top-1000 do estudo (AML vs MDS-baixo)."
+top_cpgs <- rownames(topTable(fit2, coef="AMLvsLOW", number=1000, sort.by="P"))
+is_top   <- prefix %in% top_cpgs
+dist_df <- function(cat, lab, sel=rep(TRUE,length(cat))) {
+  tb <- prop.table(table(cat[sel]))*100
+  data.frame(Regiao=names(tb), Pct=as.numeric(tb), Conjunto=lab)
 }
-am_aml <- targetsFlt$Barcode[targetsFlt$Doenca == "AML"]
-am_mds <- targetsFlt$Barcode[targetsFlt$Doenca == "MDS"]
-df_reg <- rbind(
-  data.frame(Regiao = names(prop_metilada(am_aml)), Pct = prop_metilada(am_aml), Doenca = "AML"),
-  data.frame(Regiao = names(prop_metilada(am_mds)), Pct = prop_metilada(am_mds), Doenca = "MDS"))
-df_reg <- df_reg[!is.na(df_reg$Regiao), ]
-ordem <- c("Promotor","5'UTR","Corpo do gene","3'UTR","Enhancer")
-df_reg$Regiao <- factor(df_reg$Regiao, levels = ordem[ordem %in% df_reg$Regiao])
-salvar_tab(df_reg, "06_proporcao_metilada_por_regiao")
-g <- ggplot(df_reg, aes(Regiao, Pct, fill = Doenca)) +
-  geom_col(position = position_dodge()) +
-  geom_text(aes(label = sprintf("%.1f%%", Pct)),
-            position = position_dodge(width = 0.9), vjust = -0.3, size = 3) +
-  scale_fill_manual(values = pal_doenca) +
-  labs(x = NULL, y = "% de sondas metiladas na região", fill = "Doença",
-       title = "Metilação por região genômica (AML vs MDS)") + theme_minimal()
-salvar_fig(g, "06_proporcao_metilada_por_regiao")
+comp <- rbind(dist_df(reg_gene, "Array (todos)"),
+              dist_df(reg_gene, "Estudo (top-1000)", is_top))
+comp$Regiao <- factor(comp$Regiao, levels=c("Promotor","5'UTR","Corpo do gene","3'UTR","Intergênico"))
+salvar_tab(comp, "06_distribuicao_array_vs_estudo")
+g3 <- ggplot(comp, aes(Regiao, Pct, fill=Conjunto)) +
+  geom_col(position=position_dodge()) +
+  labs(x=NULL, y="% das sondas", fill=NULL,
+       title="Distribuição por região: array vs estudo") + theme_minimal()
+salvar_fig(g3, "06_distribuicao_array_vs_estudo")
+```
+
+## Análise exploratória não supervisionada
+
+Heatmap e clustering hierárquico das sondas mais variáveis, para ver se emergem
+agrupamentos moleculares independentes dos rótulos clínicos.
+
+```{r unsup-heatmap}
+#| fig-cap: "Heatmap das 2000 sondas mais variáveis (M-value, centrado por sonda)."
+vary    <- apply(M_col, 1, var)
+top_var <- names(sort(vary, decreasing = TRUE))[1:2000]
+mat  <- M_col[top_var, ]
+anot <- data.frame(
+  Grupo      = targetsFlt$Group,
+  Blasto     = targetsFlt$Blast_pct,
+  Cariotipo  = targetsFlt$Karyotype_status,
+  Transfusao = targetsFlt$Transfusion_dependence,
+  Obito      = targetsFlt$Death)
+rownames(anot) <- colnames(mat)
+if (requireNamespace("pheatmap", quietly = TRUE)) {
+  pheatmap::pheatmap(mat, scale="row", show_rownames=FALSE, show_colnames=FALSE,
+                     annotation_col=anot, annotation_colors=list(Grupo=pal),
+                     main="Top 2000 sondas variáveis",
+                     filename="output/figuras/08_heatmap_top2000.png", width=9, height=7)
+  pheatmap::pheatmap(mat, scale="row", show_rownames=FALSE, show_colnames=FALSE,
+                     annotation_col=anot, annotation_colors=list(Grupo=pal),
+                     main="Top 2000 sondas variáveis")
+} else message("Instale 'pheatmap' para o heatmap: install.packages('pheatmap')")
+```
+
+```{r unsup-cluster}
+#| fig-cap: "Clustering hierárquico das amostras (top 2000 sondas variáveis, Ward)."
+hc  <- hclust(dist(t(mat)), method = "ward.D2")
+rot <- paste0(targetsFlt$Sample_ID, "-", substr(as.character(targetsFlt$Group), 1, 3))
+png("output/figuras/08_dendrograma.png", width=1000, height=600, res=110)
+plot(hc, labels=rot, main="Clustering hierárquico (Ward)", xlab="", sub="")
+dev.off()
+plot(hc, labels=rot, main="Clustering hierárquico (Ward)", xlab="", sub="")
+```
+
+## Variáveis clínicas: PCA e clusters
+
+```{r pca-clinica}
+#| fig-cap: "PCA (M-values) colorido por % de blastos; forma = grupo."
+pcs_df <- data.frame(PC1 = pcs[,1], PC2 = pcs[,2],
+                     Blasto = targetsFlt$Blast_pct, Grupo = targetsFlt$Group)
+g <- ggplot(pcs_df, aes(PC1, PC2, color = Blasto, shape = Grupo)) +
+  geom_point(size = 3) + scale_color_viridis_c(option = "C") +
+  labs(title = "PCA colorido por % de blastos", color = "% blastos") + theme_minimal()
+salvar_fig(g, "09_pca_por_blasto")
+```
+
+```{r clusters-clinica}
+# define k clusters a partir do dendrograma e associa às variáveis clínicas
+k <- 3
+cl <- cutree(hc, k = k)
+targetsFlt$Cluster <- factor(cl[match(targetsFlt$Barcode, names(cl))])
+salvar_tab(as.data.frame.matrix(table(Cluster = targetsFlt$Cluster, Grupo = targetsFlt$Group)),
+           "09_cluster_x_grupo")
+print(table(Cluster = targetsFlt$Cluster, Grupo = targetsFlt$Group))
+
+num_vars <- c("Blast_pct","Age","Hemoglobin","Platelets","Segmented_neutrophils")
+cat_vars <- c("Group","Sex","Karyotype_status","Karyotype_Complex","Cellularity",
+              "Transfusion_dependence","Death","Loss_of_Y")
+res <- data.frame(Variavel=character(), Teste=character(), p=numeric())
+for (v in num_vars) { x <- targetsFlt[[v]]; ok <- !is.na(x)
+  if (length(unique(targetsFlt$Cluster[ok])) > 1)
+    res <- rbind(res, data.frame(Variavel=v, Teste="Kruskal",
+      p=kruskal.test(x[ok] ~ targetsFlt$Cluster[ok])$p.value)) }
+for (v in cat_vars) { x <- factor(targetsFlt[[v]]); ok <- !is.na(x)
+  tb <- table(x[ok], targetsFlt$Cluster[ok])
+  if (nrow(tb) > 1 && ncol(tb) > 1)
+    res <- rbind(res, data.frame(Variavel=v, Teste="Fisher",
+      p=fisher.test(tb, simulate.p.value=TRUE)$p.value)) }
+res$p <- round(res$p, 4); res <- res[order(res$p), ]
+salvar_tab(res, "09_clusters_vs_clinica")
+res
 ```
 
 ## DMRs (DMRcate)
@@ -509,8 +480,7 @@ salvar_fig(g, "06_proporcao_metilada_por_regiao")
 ```{r dmrs}
 # usa a matriz NÃO colapsada, sem SNP/CH/XY; cpg.annotate colapsa (epicv2Filter="mean")
 M_dmr <- M_auto[is.finite(rowSums(M_auto)), ]
-
-# fdr = corte de CpG que "semeia" as regiões. 0.05 é rigoroso; para uma passada
+# fdr = corte de CpG que "semeia" as regiões. 0.05 e rigoroso; para uma passada
 # EXPLORATORIA com n pequeno, pode-se elevar (ex.: rodar_dmr("AMLvsMDS", fdr = 0.1)).
 rodar_dmr <- function(coef, fdr = 0.05) {
   ann <- cpg.annotate("array", M_dmr, what = "M", arraytype = "EPICv2",
@@ -528,6 +498,7 @@ rodar_dmr <- function(coef, fdr = 0.05) {
   list(ann = ann, rng = rng)
 }
 dmr_AMLvsMDS  <- rodar_dmr("AMLvsMDS")
+dmr_AMLvsLOW  <- rodar_dmr("AMLvsLOW")
 dmr_HIGHvsLOW <- rodar_dmr("HIGHvsLOW")
 ```
 
@@ -536,5 +507,3 @@ dmr_HIGHvsLOW <- rodar_dmr("HIGHvsLOW")
 ```{r sessioninfo}
 sessionInfo()
 ```
-
-
