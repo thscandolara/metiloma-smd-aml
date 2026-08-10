@@ -1,14 +1,15 @@
 ---
-title: "Metilação de DNA (EPICv2) em AML e MDS: pipeline exploratório"
+title: "Metilação de DNA (EPICv2) em AML e MDS — pipeline completo (sesame)"
 author: "Thalita Scandolara"
 date: last-modified
+lang: pt
 format:
   html:
     toc: true
     toc-depth: 3
     code-fold: show
     number-sections: true
-    embed-resources: true
+    embed-resources: true      # HTML autocontido: um único arquivo compartilhável
     fig-width: 9
     fig-height: 6
 execute:
@@ -18,11 +19,15 @@ execute:
 
 ## Introdução
 
-Análise exploratória de metilação de DNA em medula óssea de pacientes com AML e MDS
-(alto e baixo risco), em array Illumina EPICv2 (hg38). Dado o n pequeno, o foco é
-caracterizar as fontes de variação e o controle de qualidade, não classificadores.
+Pipeline exploratório de metilação de DNA (Illumina EPICv2, hg38) em medula óssea de
+pacientes com AML e MDS (alto e baixo risco). Pré-processamento e QC em **sesame**;
+estatística em **limma** (DMPs) e **DMRcate** (DMRs). Todos os objetos importantes
+(tabelas e figuras) são salvos na pasta `output/`. Dado o n pequeno, o estudo é
+exploratório.
 
-## Setup e pacotes
+Contrastes de interesse: **AML vs MDS (alto + baixo)** e **MDS alto vs MDS baixo**.
+
+## Configuração e funções auxiliares
 
 ```{r setup}
 library(sesame)
@@ -32,173 +37,343 @@ library(ggplot2)
 library(IlluminaHumanMethylationEPICv2manifest)
 library(IlluminaHumanMethylationEPICv2anno.20a1.hg38)
 
-# Caminhos (ajuste para o seu computador). Nao use setwd() em .qmd.
+# --- Caminhos (AJUSTE para o seu servidor). Nunca use setwd() em .qmd. ---
 idat_dir   <- "~/Documents/Metiloma_PRONON/arquivos_idats"
 pdata_path <- file.path(idat_dir, "pdata_pronon.csv")
 
+# --- Pastas de saída (boas práticas de bioinformática) ---
+dir.create("output",          showWarnings = FALSE)
+dir.create("output/figuras",  showWarnings = FALSE)
+dir.create("output/tabelas",  showWarnings = FALSE)
+dir.create("results",         showWarnings = FALSE)  # objetos .rds (fora do git)
+
 pal <- c(AML = "#E4572E", MDS_HIGH = "#2E9E4F", MDS_LOW = "#3E7CB1")
+pal_doenca <- c(AML = "#E4572E", MDS = "#2E7DA1")
+
+# Salva uma figura (png + pdf) e também a exibe no HTML
+salvar_fig <- function(plot, nome, w = 9, h = 6) {
+  ggsave(file.path("output/figuras", paste0(nome, ".png")), plot, width = w, height = h, dpi = 300)
+  ggsave(file.path("output/figuras", paste0(nome, ".pdf")), plot, width = w, height = h)
+  print(plot)
+}
+# Salva uma tabela em CSV
+salvar_tab <- function(df, nome) {
+  write.csv(df, file.path("output/tabelas", paste0(nome, ".csv")), row.names = TRUE)
+  invisible(df)
+}
+# Registro do nº de sondas ao longo das filtragens
+contagem_sondas <- data.frame(Etapa = character(), N_sondas = integer())
+registrar <- function(etapa, n) {
+  contagem_sondas <<- rbind(contagem_sondas, data.frame(Etapa = etapa, N_sondas = n))
+  message(etapa, ": ", n, " sondas")
+}
 ```
 
-```{r cache-sesame}
-sesameDataCache()   # baixa dados de apoio (uma vez)
+## Leitura e pré-processamento (sesame)
+
+Processa os idats uma vez (noob + dye bias + pOOBAH) e guarda em `.rds`; nas próximas
+renderizações lê o pronto. Também guarda os betas SEM normalização, para o gráfico
+antes/depois.
+
+```{r read-sdf}
+sesameDataCache()
+rds <- "results/sdfs_betas.rds"
+if (file.exists(rds)) {
+  obj <- readRDS(rds)
+  sdfs <- obj$sdfs; betas_norm <- obj$betas_norm; betas_raw <- obj$betas_raw; qcs <- obj$qcs
+} else {
+  sdfs       <- openSesame(idat_dir, prep = "QCDPB", func = NULL)          # SigDFs normalizados
+  betas_norm <- do.call(cbind, lapply(sdfs, getBetas))                     # betas normalizados
+  betas_raw  <- openSesame(idat_dir, prep = "",     func = getBetas)       # betas crus (sem norm)
+  qcs        <- lapply(sdfs, sesameQC_calcStats)                           # QC por amostra
+  saveRDS(list(sdfs = sdfs, betas_norm = betas_norm, betas_raw = betas_raw, qcs = qcs), rds)
+}
+registrar("Total no array (EPICv2)", nrow(betas_norm))
 ```
 
 ## Metadados
 
 ```{r metadados}
 targets <- read.csv(pdata_path)
-targets$Group <- factor(sub("MDS_VERY_HIGH", "MDS_HIGH", targets$Sample_type),
-                        levels = c("AML", "MDS_HIGH", "MDS_LOW"))
+targets$Group   <- factor(sub("MDS_VERY_HIGH", "MDS_HIGH", targets$Sample_type),
+                          levels = c("AML", "MDS_HIGH", "MDS_LOW"))
+targets$Doenca  <- factor(ifelse(targets$Group == "AML", "AML", "MDS"), levels = c("AML","MDS"))
+salvar_tab(as.data.frame(table(targets$Group)), "00_n_por_grupo")
 table(targets$Group)
-```
-
-## Leitura e pré-processamento (sesame)
-
-Processa os idats **uma vez** em objetos `SigDF` (noob + dye bias + pOOBAH), e
-deriva betas e QC a partir dos mesmos objetos (evita reprocessar a cada render).
-
-```{r read-sdf}
-# Processa os idats UMA vez e guarda em .rds (nao usar cache do knitr: objeto grande demais).
-# Nas proximas vezes, le o pronto -> render rapido. O .rds fica fora do git (.gitignore).
-dir.create("results", showWarnings = FALSE)
-rds <- "results/sdfs_betas.rds"
-if (file.exists(rds)) {
-  obj <- readRDS(rds); sdfs <- obj$sdfs; betas_all <- obj$betas
-} else {
-  sdfs      <- openSesame(idat_dir, prep = "QCDPB", func = NULL)   # lista de SigDF
-  betas_all <- do.call(cbind, lapply(sdfs, getBetas))             # betas (com NA do pOOBAH)
-  saveRDS(list(sdfs = sdfs, betas = betas_all), rds)
-}
-dim(betas_all)
 ```
 
 ## Controle de qualidade — AMOSTRAS
 
-O pOOBAH mascara (vira `NA`) sondas que falham na detecção, por amostra. A **fração
-detectada por amostra** é a métrica de QC de amostra (análoga ao mean detection
-p-value do minfi). Métricas oficiais completas vêm do `sesameQC_calcStats`.
+A fração de sondas detectadas (pOOBAH) por amostra é a métrica de qualidade da amostra.
 
-```{r qc-amostra-calc}
-# métricas oficiais do sesame (detecção, intensidade, dye bias, conversão...)
-qcs   <- lapply(sdfs, sesameQC_calcStats)
-qc_df <- do.call(rbind, lapply(qcs, as.data.frame))
-qc_df$Barcode <- names(sdfs)
-
-# tabela de QC de amostra (detecção derivada dos betas, robusta para plotar)
-sampleqc <- data.frame(
-  Barcode   = colnames(betas_all),
-  Detection = 1 - colMeans(is.na(betas_all))
-)
-sampleqc$Group <- targets$Group[match(sampleqc$Barcode, targets$Barcode)]
+```{r qc-amostra}
+qc_df <- do.call(rbind, lapply(qcs, as.data.frame)); qc_df$Barcode <- names(sdfs)
+sampleqc <- data.frame(Barcode = colnames(betas_norm),
+                       Deteccao = 1 - colMeans(is.na(betas_norm)))
+sampleqc$Grupo <- targets$Group[match(sampleqc$Barcode, targets$Barcode)]
+salvar_tab(sampleqc[order(sampleqc$Deteccao), ], "01_qc_deteccao_por_amostra")
 ```
 
-### Gráfico: detecção por amostra
-
-```{r qc-amostra-plot-det}
-#| fig-cap: "Fração de sondas detectadas por amostra (pOOBAH). Linha = corte de exclusão."
-cutoff <- 0.80   # manter detecção >= 80% (equivale a <=20% mascarado)
-ggplot(sampleqc, aes(reorder(Barcode, Detection), Detection, fill = Group)) +
-  geom_col() +
-  geom_hline(yintercept = cutoff, linetype = "dashed", color = "red") +
-  scale_fill_manual(values = pal) +
-  coord_flip() +
-  labs(x = NULL, y = "Fração detectada", title = "QC de amostra: detecção (pOOBAH)") +
-  theme_minimal(base_size = 9)
+```{r qc-amostra-fig}
+#| fig-cap: "Fração de sondas detectadas por amostra (pOOBAH). Linha vermelha = corte de exclusão."
+corte_amostra <- 0.80
+g <- ggplot(sampleqc, aes(reorder(Barcode, Deteccao), Deteccao, fill = Grupo)) +
+  geom_col() + geom_hline(yintercept = corte_amostra, linetype = "dashed", color = "red") +
+  scale_fill_manual(values = pal) + coord_flip() +
+  labs(x = NULL, y = "Fração detectada", title = "QC de amostra: detecção (pOOBAH)",
+       fill = "Grupo") + theme_minimal(base_size = 9)
+salvar_fig(g, "01_qc_deteccao_por_amostra")
 ```
 
-### Gráfico: QC oficial do sesame
+```{r qc-amostra-exclusao}
+boas   <- sampleqc$Barcode[sampleqc$Deteccao >= corte_amostra]
+ruins  <- setdiff(sampleqc$Barcode, boas)
+salvar_tab(sampleqc[sampleqc$Barcode %in% ruins, ], "01_amostras_excluidas")
+message("Amostras excluídas (", length(ruins), "): ", paste(ruins, collapse = ", "))
 
-```{r qc-amostra-plot-sesame}
-#| fig-cap: "Barras de QC do sesame por amostra."
-sesameQC_plotBar(qcs)
-```
-
-### Exclusão de amostras ruins
-
-```{r qc-amostra-filtro}
-boas <- sampleqc$Barcode[sampleqc$Detection >= cutoff]
-ruins <- setdiff(sampleqc$Barcode, boas)
-cat("Excluídas (", length(ruins), "):", paste(ruins, collapse = ", "), "\n")
-
-betas_qc   <- betas_all[, boas]
+betas_qc   <- betas_norm[, boas]
+raw_qc     <- betas_raw[, boas]
 targetsFlt <- targets[match(boas, targets$Barcode), ]
-table(targetsFlt$Group)   # confira o balanço de grupo após excluir
+targetsFlt$Sentrix_ID <- factor(targetsFlt$Sentrix_ID)   # lote = chip
+targetsFlt$Sex        <- factor(targetsFlt$Sex)
+salvar_tab(as.data.frame(table(targetsFlt$Group)), "01_n_por_grupo_pos_exclusao")
+table(targetsFlt$Group)
 ```
 
-## Controle de qualidade — SONDAS
+## Densidade dos betas: antes x depois da normalização
 
-Depois de tirar amostra ruim, filtra sonda pela fração de `NA` **nas amostras boas**
-(mantém sondas detectadas em ≥95%). Nada de `complete.cases` (jogaria fora sonda que
-falha em uma única amostra).
+```{r densidade-antes-depois}
+#| fig-cap: "Distribuição de beta por amostra, antes (cru) e depois (sesame) da normalização."
+dens_df <- function(mat, rotulo) {
+  do.call(rbind, lapply(colnames(mat), function(s){
+    x <- mat[, s]; x <- x[is.finite(x)]
+    data.frame(beta = x, Sample = s, Etapa = rotulo,
+               Grupo = targetsFlt$Group[match(s, targetsFlt$Barcode)])
+  }))
+}
+dd <- rbind(dens_df(raw_qc, "Cru (sem normalização)"), dens_df(betas_qc, "Normalizado (sesame)"))
+g <- ggplot(dd, aes(beta, group = Sample, color = Grupo)) +
+  geom_density(linewidth = 0.3) + facet_wrap(~ Etapa) +
+  scale_color_manual(values = pal) +
+  labs(x = "Beta", y = "Densidade", title = "Densidade dos betas: antes x depois",
+       color = "Grupo") + theme_minimal()
+salvar_fig(g, "02_densidade_antes_depois")
+```
 
-### Gráfico: distribuição de falha por sonda
+## Controle de qualidade — SONDAS (com contagem a cada filtro)
 
-```{r qc-sonda-plot}
+Ordem: detecção (≥95%) → remoção de SNP/cross-reactive → remoção de chrX/chrY →
+colapso de réplicas EPICv2 (média). A contagem é registrada a cada passo.
+
+```{r anotacao}
+# Anotação EPICv2 (chr, posição, grupo gênico) — usada para XY e regiões
+annEPIC <- getAnnotation(IlluminaHumanMethylationEPICv2anno.20a1.hg38)
+```
+
+```{r filtro-deteccao}
 #| fig-cap: "Fração de amostras em que cada sonda falha. Linha = corte (5%)."
-frac_na_sonda <- rowMeans(is.na(betas_qc))
-ggplot(data.frame(f = frac_na_sonda), aes(f)) +
+frac_na <- rowMeans(is.na(betas_qc))
+g <- ggplot(data.frame(f = frac_na), aes(f)) +
   geom_histogram(bins = 60, fill = "grey40") +
   geom_vline(xintercept = 0.05, linetype = "dashed", color = "red") +
   labs(x = "Fração de amostras com falha", y = "nº de sondas",
-       title = "QC de sonda: falha de detecção") +
-  theme_minimal()
+       title = "QC de sonda: falha de detecção") + theme_minimal()
+salvar_fig(g, "03_falha_por_sonda")
+
+betas_det <- betas_qc[frac_na <= 0.05, ]
+registrar("Após detecção (>=95%)", nrow(betas_det))
 ```
 
-```{r qc-sonda-filtro}
-betas_flt <- betas_qc[frac_na_sonda <= 0.05, ]
-cat("Sondas retidas:", nrow(betas_flt), "de", nrow(betas_qc), "\n")
+```{r filtro-snp-ch}
+# Remoção de SNP + cross-reactive (rmSNPandCH opera por nome de sonda EPICv2)
+M_det   <- minfi::logit2(betas_det)
+M_noSNP <- rmSNPandCH(M_det, rmcrosshyb = TRUE)     # remove SNP-próximas e cross-reactive
+registrar("Após SNP + cross-reactive", nrow(M_noSNP))
+
+# Remoção de cromossomos sexuais (explícita, via anotação)
+sondas_xy <- rownames(annEPIC)[annEPIC$chr %in% c("chrX", "chrY")]
+M_auto    <- M_noSNP[!(rownames(M_noSNP) %in% sondas_xy), ]
+registrar("Após remover chrX/chrY", nrow(M_auto))
 ```
 
-## Survey pós-normalização
-
-### Densidade dos betas por grupo
-
-```{r survey-densidade}
-#| fig-cap: "Distribuição de beta por amostra, colorida por grupo."
-d <- do.call(rbind, lapply(colnames(betas_flt), function(s){
-  x <- betas_flt[, s]; x <- x[is.finite(x)]
-  data.frame(beta = x, Group = targetsFlt$Group[match(s, targetsFlt$Barcode)], Sample = s)
-}))
-ggplot(d, aes(beta, group = Sample, color = Group)) +
-  geom_density(linewidth = 0.3) + scale_color_manual(values = pal) +
-  labs(x = "Beta", y = "Densidade") + theme_minimal()
+```{r colapso-replicas}
+# Colapso de réplicas EPICv2 pela média (para 1 CpG por linha nos DMPs)
+betas_auto <- betas_det[rownames(M_auto), ]
+betas_col  <- betasCollapseToPfx(betas_auto)         # média das réplicas por CpG
+M_col      <- minfi::logit2(betas_col)
+M_col      <- M_col[is.finite(rowSums(M_col)), ]     # descarta poucas linhas saturadas (Inf)
+registrar("Após colapso de réplicas (final DMP)", nrow(M_col))
 ```
 
-### MDS / PCA (fontes de variação)
+```{r tabela-contagem}
+#| fig-cap: "Número de sondas antes e depois de cada filtragem."
+salvar_tab(contagem_sondas, "03_contagem_sondas_por_etapa")
+contagem_sondas$Etapa <- factor(contagem_sondas$Etapa, levels = contagem_sondas$Etapa)
+g <- ggplot(contagem_sondas, aes(Etapa, N_sondas)) +
+  geom_col(fill = "#3E7CB1") +
+  geom_text(aes(label = format(N_sondas, big.mark = ".")), vjust = -0.4, size = 3) +
+  labs(x = NULL, y = "nº de sondas", title = "Sondas retidas por etapa de filtragem") +
+  theme_minimal() + theme(axis.text.x = element_text(angle = 25, hjust = 1))
+salvar_fig(g, "03_contagem_sondas")
+```
 
-```{r survey-mds}
-#| fig-cap: "MDS dos M-values, colorido por grupo."
-Ms <- minfi::logit2(betas_flt)
-Ms <- Ms[complete.cases(Ms), ]           # complete.cases SÓ aqui (prcomp/MDS não aceita NA)
-plotMDS(Ms, top = 1000, gene.selection = "common",
-        col = pal[targetsFlt$Group], pch = 19)
+## Fontes de variação (PCA / MDS) e efeito de lote
+
+```{r mds}
+#| fig-cap: "MDS dos M-values (colapsados), colorido por grupo."
+png("output/figuras/04_mds_grupo.png", width = 900, height = 700, res = 120)
+plotMDS(M_col, top = 1000, gene.selection = "common", col = pal[targetsFlt$Group], pch = 19)
+legend("topright", legend = names(pal), text.col = pal, bty = "n")
+dev.off()
+plotMDS(M_col, top = 1000, gene.selection = "common", col = pal[targetsFlt$Group], pch = 19)
 legend("topright", legend = names(pal), text.col = pal, bty = "n")
 ```
 
-### PCA × variáveis clínicas (efeito de lote / composição)
-
-```{r pca-confounders}
-pcs  <- prcomp(t(Ms))$x[, 1:5]
-vars_num <- c("Age","Blast_pct","Hemoglobin","Platelets")
-vars_cat <- c("Group","Sex","Cellularity","Sentrix_ID")
-r2 <- function(v, fac){ x <- targetsFlt[[v]]; if(fac) x <- factor(x); ok <- !is.na(x)
-  sapply(1:5, function(p) summary(lm(pcs[ok,p] ~ x[ok]))$r.squared) }
-res <- rbind(t(sapply(vars_num, r2, fac=FALSE)), t(sapply(vars_cat, r2, fac=TRUE)))
-colnames(res) <- paste0("PC", 1:5); round(res, 2)
+```{r pca-confundidores}
+pcs <- prcomp(t(M_col))$x[, 1:5]
+r2  <- function(v, fac){ x <- targetsFlt[[v]]; if (fac) x <- factor(x); ok <- !is.na(x)
+  sapply(1:5, function(p) summary(lm(pcs[ok, p] ~ x[ok]))$r.squared) }
+num <- c("Age","Blast_pct","Hemoglobin","Platelets")
+cat <- c("Group","Sex","Cellularity","Sentrix_ID")
+r2tab <- rbind(t(sapply(num, r2, fac = FALSE)), t(sapply(cat, r2, fac = TRUE)))
+colnames(r2tab) <- paste0("PC", 1:5)
+salvar_tab(round(r2tab, 3), "04_pca_vs_variaveis_R2")
+round(r2tab, 2)
 ```
 
-## Filtro final e análise diferencial
+```{r grupo-x-chip}
+salvar_tab(as.data.frame.matrix(table(targetsFlt$Group, targetsFlt$Sentrix_ID)),
+           "04_grupo_x_chip")
+table(targetsFlt$Group, targetsFlt$Sentrix_ID)
+```
 
-```{r prep-diff}
-#| eval: false
-Ms.flt <- rmSNPandCH(minfi::logit2(betas_flt), rmcrosshyb = TRUE)  # SNP + cross-hyb + XY
-design <- model.matrix(~ 0 + Group + Sex, data = targetsFlt)
+## Modelo e contrastes (ajustado por sexo e lote)
+
+O lote (chip) é modelado como covariável, seguindo a recomendação de ajustar o efeito de
+lote dentro do modelo (em vez de removê-lo com ComBat). Blasto NÃO é ajustado: é biologia
+(está na definição de AML).
+
+```{r design}
+Grupo <- targetsFlt$Group
+design <- model.matrix(~ 0 + Grupo + Sex + Sentrix_ID, data = targetsFlt)
 colnames(design) <- make.names(colnames(design))
-cont <- makeContrasts(AMLvsHIGH = GroupAML - GroupMDS_HIGH,
-                      AMLvsLOW  = GroupAML - GroupMDS_LOW,
-                      HIGHvsLOW = GroupMDS_HIGH - GroupMDS_LOW, levels = design)
-fit <- eBayes(contrasts.fit(lmFit(Ms.flt, design), cont))
-summary(decideTests(fit))
+stopifnot(all(colnames(M_col) == targetsFlt$Barcode))
+
+cont <- makeContrasts(
+  AMLvsMDS  = GrupoAML - (GrupoMDS_HIGH + GrupoMDS_LOW) / 2,  # AML vs MDS (alto+baixo)
+  HIGHvsLOW = GrupoMDS_HIGH - GrupoMDS_LOW,                   # MDS alto vs baixo
+  levels = design)
+cont
+```
+
+## DMPs (limma)
+
+```{r dmps}
+fit  <- lmFit(M_col, design)
+fit2 <- eBayes(contrasts.fit(fit, cont))
+resumo <- summary(decideTests(fit2, p.value = 0.05))
+salvar_tab(as.data.frame.matrix(resumo), "05_resumo_DMPs")
+resumo
+```
+
+```{r dmps-tabela}
+# anotação por CpG (nome colapsado bate com o prefixo do annEPIC)
+ann_pfx <- annEPIC[match(rownames(M_col), sub("_.*$", "", rownames(annEPIC))),
+                   c("chr","pos","UCSC_RefGene_Name","UCSC_RefGene_Group","Relation_to_Island")]
+rownames(ann_pfx) <- rownames(M_col)   # alinhar pelos nomes colapsados (prefixo do CpG)
+extrair_dmp <- function(coef) {
+  tt <- topTable(fit2, coef = coef, number = Inf, adjust.method = "BH")
+  tt <- cbind(CpG = rownames(tt), tt, ann_pfx[rownames(tt), ])
+  salvar_tab(tt, paste0("05_DMPs_", coef))
+  message(coef, " — DMPs com adj.P.Val < 0.05: ", sum(tt$adj.P.Val < 0.05, na.rm = TRUE))
+  tt
+}
+dmp_AMLvsMDS  <- extrair_dmp("AMLvsMDS")
+dmp_HIGHvsLOW <- extrair_dmp("HIGHvsLOW")
+```
+
+```{r volcano}
+#| fig-cap: "Volcano plots dos dois contrastes (vermelho: adj.P.Val < 0.05)."
+volcano <- function(tt, titulo) {
+  tt$sig <- ifelse(tt$adj.P.Val < 0.05, "FDR<0.05", "n.s.")
+  ggplot(tt, aes(logFC, -log10(P.Value), color = sig)) +
+    geom_point(size = 0.6, alpha = 0.5) +
+    scale_color_manual(values = c("FDR<0.05" = "red", "n.s." = "grey70")) +
+    labs(x = "logFC (M-value)", y = "-log10(P)", title = titulo, color = NULL) +
+    theme_minimal()
+}
+g1 <- volcano(dmp_AMLvsMDS,  "AML vs MDS")
+g2 <- volcano(dmp_HIGHvsLOW, "MDS alto vs baixo")
+salvar_fig(g1, "05_volcano_AMLvsMDS"); salvar_fig(g2, "05_volcano_HIGHvsLOW")
+```
+
+## Proporção de sondas metiladas por região genômica
+
+Para cada região (promotor, 5'UTR, corpo do gene, 3'UTR e — se disponível — enhancer),
+calcula-se a % de sondas metiladas (beta médio do grupo > 0.5) em relação ao total de
+sondas daquela região, separando AML e MDS.
+
+```{r regiao-setup}
+# categoria de região a partir do UCSC_RefGene_Group (primeiro termo)
+grp_gene <- sub(";.*$", "", annEPIC$UCSC_RefGene_Group)
+regiao <- rep(NA_character_, length(grp_gene)); names(regiao) <- sub("_.*$","",rownames(annEPIC))
+regiao[grp_gene %in% c("TSS200","TSS1500","1stExon")] <- "Promotor"
+regiao[grp_gene == "5'UTR"] <- "5'UTR"
+regiao[grp_gene == "Body"]  <- "Corpo do gene"
+regiao[grp_gene == "3'UTR"] <- "3'UTR"
+# enhancer: procura uma coluna de enhancer na anotação (nome varia por versão)
+col_enh <- grep("nhancer", colnames(annEPIC), value = TRUE)
+if (length(col_enh)) {
+  is_enh <- annEPIC[[col_enh[1]]] %in% c("TRUE", TRUE, "Yes", "Y")
+  regiao[is_enh] <- "Enhancer"
+}
+```
+
+```{r regiao-plot}
+#| fig-cap: "Proporção (%) de sondas metiladas (beta médio > 0.5) por região, em AML e MDS."
+betas_final <- betas_col[rownames(M_col), ]        # betas colapsados usados nos DMPs
+reg_cpg <- regiao[rownames(betas_final)]
+prop_metilada <- function(grupo_amostras) {
+  mb <- rowMeans(betas_final[, grupo_amostras, drop = FALSE], na.rm = TRUE)
+  met <- mb > 0.5
+  tapply(met, reg_cpg, function(x) 100 * mean(x, na.rm = TRUE))
+}
+am_aml <- targetsFlt$Barcode[targetsFlt$Doenca == "AML"]
+am_mds <- targetsFlt$Barcode[targetsFlt$Doenca == "MDS"]
+df_reg <- rbind(
+  data.frame(Regiao = names(prop_metilada(am_aml)), Pct = prop_metilada(am_aml), Doenca = "AML"),
+  data.frame(Regiao = names(prop_metilada(am_mds)), Pct = prop_metilada(am_mds), Doenca = "MDS"))
+df_reg <- df_reg[!is.na(df_reg$Regiao), ]
+ordem <- c("Promotor","5'UTR","Corpo do gene","3'UTR","Enhancer")
+df_reg$Regiao <- factor(df_reg$Regiao, levels = ordem[ordem %in% df_reg$Regiao])
+salvar_tab(df_reg, "06_proporcao_metilada_por_regiao")
+g <- ggplot(df_reg, aes(Regiao, Pct, fill = Doenca)) +
+  geom_col(position = position_dodge()) +
+  geom_text(aes(label = sprintf("%.1f%%", Pct)),
+            position = position_dodge(width = 0.9), vjust = -0.3, size = 3) +
+  scale_fill_manual(values = pal_doenca) +
+  labs(x = NULL, y = "% de sondas metiladas na região", fill = "Doença",
+       title = "Metilação por região genômica (AML vs MDS)") + theme_minimal()
+salvar_fig(g, "06_proporcao_metilada_por_regiao")
+```
+
+## DMRs (DMRcate)
+
+```{r dmrs}
+# usa a matriz NÃO colapsada, sem SNP/CH/XY; cpg.annotate colapsa (epicv2Filter="mean")
+M_dmr <- M_auto[is.finite(rowSums(M_auto)), ]
+rodar_dmr <- function(coef, fdr = 0.05) {
+  ann <- cpg.annotate("array", M_dmr, what = "M", arraytype = "EPICv2",
+                      epicv2Filter = "mean", analysis.type = "differential",
+                      design = design, contrasts = TRUE, cont.matrix = cont,
+                      coef = coef, fdr = fdr)
+  rng <- extractRanges(dmrcate(ann, lambda = 1000, C = 2), genome = "hg38")
+  salvar_tab(as.data.frame(rng), paste0("07_DMRs_", coef))
+  message(coef, " — DMRs: ", length(rng))
+  list(ann = ann, rng = rng)
+}
+dmr_AMLvsMDS  <- rodar_dmr("AMLvsMDS")
+dmr_HIGHvsLOW <- rodar_dmr("HIGHvsLOW")
 ```
 
 ## Informação da sessão
