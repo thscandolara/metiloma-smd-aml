@@ -290,20 +290,58 @@ resumo
 ```
 
 ```{r dmps-tabela}
-# anotação por CpG (nome colapsado bate com o prefixo do annEPIC)
+# betas colapsados alinhados aos CpGs testados (para delta-beta = diferença de beta médio)
+betas_dmp <- betas_col[rownames(M_col), ]
+gmeans <- sapply(levels(targetsFlt$Group), function(g)
+  rowMeans(betas_dmp[, targetsFlt$Barcode[targetsFlt$Group == g], drop = FALSE], na.rm = TRUE))
+deltaBeta <- list(
+  AMLvsMDS  = gmeans[,"AML"]      - rowMeans(gmeans[, c("MDS_HIGH","MDS_LOW")]),
+  AMLvsLOW  = gmeans[,"AML"]      - gmeans[,"MDS_LOW"],
+  HIGHvsLOW = gmeans[,"MDS_HIGH"] - gmeans[,"MDS_LOW"])
+
 ann_pfx <- annEPIC[match(rownames(M_col), sub("_.*$", "", rownames(annEPIC))),
                    c("chr","pos","UCSC_RefGene_Name","UCSC_RefGene_Group","Relation_to_Island")]
-rownames(ann_pfx) <- rownames(M_col)   # alinhar pelos nomes colapsados (prefixo do CpG)
+rownames(ann_pfx) <- rownames(M_col)
+
 extrair_dmp <- function(coef) {
   tt <- topTable(fit2, coef = coef, number = Inf, adjust.method = "BH")
-  tt <- cbind(CpG = rownames(tt), tt, ann_pfx[rownames(tt), ])
-  salvar_tab(tt, paste0("05_DMPs_", coef))
-  message(coef, " — DMPs com adj.P.Val < 0.05: ", sum(tt$adj.P.Val < 0.05, na.rm = TRUE))
+  tt$CpG       <- rownames(tt)
+  tt$deltaBeta <- deltaBeta[[coef]][rownames(tt)]
+  tt <- cbind(tt, ann_pfx[rownames(tt), ])
+  tt <- tt[, c("CpG","logFC","deltaBeta","P.Value","adj.P.Val",
+               "chr","pos","UCSC_RefGene_Name","UCSC_RefGene_Group","Relation_to_Island")]
+  salvar_tab(tt, paste0("05_DMPs_", coef))                 # TABELA COMPLETA (nominal)
+  # candidatos EXPLORATÓRIOS (limiares pré-especificados): P nominal < 0.001 e |deltaBeta| >= 0.10
+  # ATENÇÃO: não são achados confirmatórios (não passam FDR).
+  cand <- tt[!is.na(tt$deltaBeta) & tt$P.Value < 0.001 & abs(tt$deltaBeta) >= 0.10, ]
+  salvar_tab(cand, paste0("05_candidatos_", coef))
+  message(coef, " — DMPs FDR<0.05: ", sum(tt$adj.P.Val < 0.05, na.rm = TRUE),
+          " | candidatos exploratórios: ", nrow(cand))
   tt
 }
 dmp_AMLvsMDS  <- extrair_dmp("AMLvsMDS")
 dmp_AMLvsLOW  <- extrair_dmp("AMLvsLOW")
 dmp_HIGHvsLOW <- extrair_dmp("HIGHvsLOW")
+```
+
+```{r diagnosticos}
+#| fig-cap: "Diagnósticos por contraste: histograma de p, QQ-plot e distribuição de |delta-beta|."
+dmps_lst <- list(AMLvsMDS = dmp_AMLvsMDS, AMLvsLOW = dmp_AMLvsLOW, HIGHvsLOW = dmp_HIGHvsLOW)
+for (nm in names(dmps_lst)) {
+  tt <- dmps_lst[[nm]]
+  salvar_fig(ggplot(tt, aes(P.Value)) + geom_histogram(bins = 50, fill = "grey40") +
+    labs(title = paste("Histograma de p —", nm), x = "P.Value", y = "nº de CpGs") + theme_minimal(),
+    paste0("05b_phist_", nm))
+  obs <- -log10(sort(tt$P.Value)); esp <- -log10(ppoints(length(obs)))
+  salvar_fig(ggplot(data.frame(esp, obs), aes(esp, obs)) + geom_point(size=0.4, alpha=0.4) +
+    geom_abline(slope=1, intercept=0, color="red") +
+    labs(title=paste("QQ-plot —", nm), x="-log10(P) esperado", y="-log10(P) observado") + theme_minimal(),
+    paste0("05b_qq_", nm))
+  salvar_fig(ggplot(tt, aes(abs(deltaBeta))) + geom_histogram(bins=50, fill="grey40") +
+    geom_vline(xintercept=0.10, linetype="dashed", color="red") +
+    labs(title=paste("|delta-beta| —", nm), x="|delta-beta|", y="nº de CpGs") + theme_minimal(),
+    paste0("05b_deltabeta_", nm))
+}
 ```
 
 ```{r volcano}
@@ -500,6 +538,88 @@ rodar_dmr <- function(coef, fdr = 0.05) {
 dmr_AMLvsMDS  <- rodar_dmr("AMLvsMDS")
 dmr_AMLvsLOW  <- rodar_dmr("AMLvsLOW")
 dmr_HIGHvsLOW <- rodar_dmr("HIGHvsLOW")
+```
+
+## Análises de sensibilidade e diagnósticas
+
+### Confundimento lote x grupo
+
+```{r conf-lote}
+tb  <- table(targetsFlt$Group, targetsFlt$Sentrix_ID)
+chi <- suppressWarnings(chisq.test(tb))
+cramer <- sqrt(as.numeric(chi$statistic) / (sum(tb) * (min(dim(tb)) - 1)))
+salvar_tab(data.frame(cramerV = round(cramer,3), p_chisq = signif(chi$p.value,3)),
+           "10_confundimento_lote_grupo")
+cat("Cramér's V (grupo x chip):", round(cramer,3), "| p:", signif(chi$p.value,3), "\n")
+```
+
+```{r mds-lote}
+#| fig-cap: "MDS colorido por grupo e com forma por chip (lote)."
+mds <- plotMDS(M_col, top=1000, gene.selection="common", plot=FALSE)
+dfm <- data.frame(x=mds$x, y=mds$y, Grupo=targetsFlt$Group, Chip=targetsFlt$Sentrix_ID)
+g <- ggplot(dfm, aes(x, y, color=Grupo, shape=Chip)) + geom_point(size=3) +
+  scale_color_manual(values=pal) + scale_shape_manual(values=1:nlevels(dfm$Chip)) +
+  labs(x="Dim 1", y="Dim 2", title="MDS: cor = grupo, forma = chip") + theme_minimal()
+salvar_fig(g, "10_mds_grupo_e_lote")
+```
+
+```{r top-nominal-lote}
+# os CpGs nominais mais fortes (AMLvsLOW) são dominados por um chip?
+top50 <- head(dmp_AMLvsLOW$CpG, 50)
+pc1 <- prcomp(t(betas_dmp[top50, ]))$x[,1]
+cat("Top-50 CpGs nominais: R2 do PC1 ~ chip =",
+    round(summary(lm(pc1 ~ targetsFlt$Sentrix_ID))$r.squared, 2), "\n")
+```
+
+### Sensibilidade: com e sem os outliers (12 e 26)
+
+```{r sens-outliers}
+# Refit incluindo 12 e 26 (mesmos filtros/design), só para contagem comparativa de DMPs.
+bc  <- betas_norm[, boas]                      # 'boas' = detecção OK (inclui 12 e 26)
+tg  <- targets[match(colnames(bc), targets$Barcode), ]
+Grp <- tg$Group; Sx <- droplevels(factor(tg$Sex)); Ch <- droplevels(factor(tg$Sentrix_ID))
+bc  <- bc[rowMeans(is.na(bc)) <= 0.05, ]
+Mx  <- rmSNPandCH(minfi::logit2(bc), rmcrosshyb = TRUE)
+Mx  <- Mx[!(rownames(Mx) %in% sondas_xy), ]
+bx  <- betasCollapseToPfx(bc[rownames(Mx), ]); Mcx <- minfi::logit2(bx)
+Mcx <- Mcx[is.finite(rowSums(Mcx)), ]
+Dx  <- model.matrix(~ 0 + Grp + Sx + Ch); colnames(Dx) <- make.names(colnames(Dx))
+Cx  <- makeContrasts(AMLvsLOW = GrpAML - GrpMDS_LOW, levels = Dx)
+fx  <- eBayes(contrasts.fit(lmFit(Mcx, Dx), Cx))
+cat("SEM remover outliers: n =", ncol(Mcx), "| DMPs FDR<0.05 (AMLvsLOW) =",
+    sum(decideTests(fx, p.value=0.05) != 0), "\n")
+cat("COM remoção (principal): DMPs FDR<0.05 (AMLvsLOW) =",
+    sum(dmp_AMLvsLOW$adj.P.Val < 0.05, na.rm = TRUE), "\n")
+```
+
+### Sensibilidade: modelo secundário com blastos como covariável
+
+```{r sens-blasto}
+# Ajuste secundário adicionando % de blastos (amostras com blasto NA são descartadas).
+ok  <- !is.na(targetsFlt$Blast_pct)
+Db  <- model.matrix(~ 0 + Group + Sex + Sentrix_ID + Blast_pct,
+                    data = droplevels(targetsFlt[ok, ]))
+colnames(Db) <- make.names(colnames(Db))
+Cb  <- makeContrasts(AMLvsLOW = GroupAML - GroupMDS_LOW, levels = Db)
+fb  <- eBayes(contrasts.fit(lmFit(M_col[, ok], Db), Cb))
+cat("Modelo + blastos: n =", sum(ok), "| DMPs FDR<0.05 (AMLvsLOW) =",
+    sum(decideTests(fb, p.value=0.05) != 0), "\n")
+```
+
+### Composição celular (estimativa; medula não tem referência padrão)
+
+```{r cellcomp}
+# EpiDISH com referência de SANGUE (aproximação — medula difere; interpretar com cautela).
+if (requireNamespace("EpiDISH", quietly = TRUE)) {
+  data("centDHSbloodDMC.m", package = "EpiDISH")
+  frac <- EpiDISH::epidish(beta.m = betas_dmp, ref.m = EpiDISH::centDHSbloodDMC.m,
+                           method = "RPC")$estF
+  frac <- data.frame(Barcode = rownames(frac), frac,
+                     Grupo = targetsFlt$Group[match(rownames(frac), targetsFlt$Barcode)],
+                     Blasto = targetsFlt$Blast_pct[match(rownames(frac), targetsFlt$Barcode)])
+  salvar_tab(frac, "10_composicao_celular_EpiDISH")
+  head(frac)
+} else message("Instale EpiDISH para estimar composição celular: BiocManager::install('EpiDISH')")
 ```
 
 ## Informação da sessão
