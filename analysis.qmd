@@ -36,6 +36,9 @@ library(DMRcate)
 library(ggplot2)
 library(IlluminaHumanMethylationEPICv2manifest)
 library(IlluminaHumanMethylationEPICv2anno.20a1.hg38)
+library(pheatmap)
+library(EpiDISH)
+
 
 # --- Caminhos (AJUSTE para o seu servidor). Nunca use setwd() em .qmd. ---
 idat_dir   <- "~/Documents/Metiloma_PRONON/arquivos_idats"
@@ -267,96 +270,460 @@ lote dentro do modelo (em vez de removê-lo com ComBat). Blasto NÃO é ajustado
 
 ```{r design}
 Grupo <- targetsFlt$Group
-design <- model.matrix(~ 0 + Grupo + Sex + Sentrix_ID, data = targetsFlt)
-colnames(design) <- make.names(colnames(design))
-stopifnot(all(colnames(M_col) == targetsFlt$Barcode))
 
-cont <- makeContrasts(
-  AMLvsMDS  = GrupoAML - (GrupoMDS_HIGH + GrupoMDS_LOW) / 2,  # AML vs MDS (alto+baixo)
-  AMLvsLOW  = GrupoAML - GrupoMDS_LOW,                        # AML vs MDS baixo (mais contrastante)
-  HIGHvsLOW = GrupoMDS_HIGH - GrupoMDS_LOW,                   # MDS alto vs baixo
-  levels = design)
-cont
-```
+# ============================================================
+# Modelo 1: AML vs MDS
+# MDS = MDS_HIGH + MDS_LOW
+# ============================================================
 
-## DMPs (limma)
+targetsFlt$Group_AML_MDS <- factor(
+  ifelse(
+    targetsFlt$Group == "AML",
+    "AML",
+    "MDS"
+  ),
+  levels = c("AML", "MDS")
+)
 
-```{r dmps}
-fit  <- lmFit(M_col, design)
-fit2 <- eBayes(contrasts.fit(fit, cont))
-resumo <- summary(decideTests(fit2, p.value = 0.05))
+design_AML_MDS <- model.matrix(
+  ~ 0 + Group_AML_MDS + Sex + Sentrix_ID,
+  data = targetsFlt
+)
+
+colnames(design_AML_MDS) <- make.names(
+  colnames(design_AML_MDS)
+)
+
+
+# ============================================================
+# Modelo 2: AML, MDS_HIGH e MDS_LOW
+# ============================================================
+
+design_3groups <- model.matrix(
+  ~ 0 + Grupo + Sex + Sentrix_ID,
+  data = targetsFlt
+)
+
+colnames(design_3groups) <- make.names(
+  colnames(design_3groups)
+)
+
+stopifnot(
+  all(colnames(M_col) == targetsFlt$Barcode)
+)
+
+
+# ============================================================
+# CONTRASTES
+# ============================================================
+
+# 1. AML vs MDS
+cont_AML_MDS <- makeContrasts(
+  AMLvsMDS = Group_AML_MDSAML - Group_AML_MDSMDS,
+  levels = design_AML_MDS
+)
+
+
+# 2-4. Comparações mantendo HIGH e LOW separados
+cont_3groups <- makeContrasts(
+  AMLvsHIGH = GrupoAML - GrupoMDS_HIGH,
+  AMLvsLOW  = GrupoAML - GrupoMDS_LOW,
+  LOWvsHIGH = GrupoMDS_LOW - GrupoMDS_HIGH,
+  levels = design_3groups
+)
+
+cont_AML_MDS
+cont_3groups
+
+# ============================================================
+# Ajuste dos modelos (limma) — cria fit2_AML_MDS e fit2_3groups
+# ============================================================
+fit2_AML_MDS <- eBayes(contrasts.fit(lmFit(M_col, design_AML_MDS), cont_AML_MDS))
+fit2_3groups <- eBayes(contrasts.fit(lmFit(M_col, design_3groups), cont_3groups))
+
+# resumo de DMPs (FDR < 0.05) dos quatro contrastes
+resumo <- cbind(summary(decideTests(fit2_AML_MDS, p.value = 0.05)),
+                summary(decideTests(fit2_3groups, p.value = 0.05)))
 salvar_tab(as.data.frame.matrix(resumo), "05_resumo_DMPs")
 resumo
 ```
 
-```{r dmps-tabela}
-# betas colapsados alinhados aos CpGs testados (para delta-beta = diferença de beta médio)
-betas_dmp <- betas_col[rownames(M_col), ]
-gmeans <- sapply(levels(targetsFlt$Group), function(g)
-  rowMeans(betas_dmp[, targetsFlt$Barcode[targetsFlt$Group == g], drop = FALSE], na.rm = TRUE))
-deltaBeta <- list(
-  AMLvsMDS  = gmeans[,"AML"]      - rowMeans(gmeans[, c("MDS_HIGH","MDS_LOW")]),
-  AMLvsLOW  = gmeans[,"AML"]      - gmeans[,"MDS_LOW"],
-  HIGHvsLOW = gmeans[,"MDS_HIGH"] - gmeans[,"MDS_LOW"])
+## DMPs (limma)
 
-ann_pfx <- annEPIC[match(rownames(M_col), sub("_.*$", "", rownames(annEPIC))),
-                   c("chr","pos","UCSC_RefGene_Name","UCSC_RefGene_Group","Relation_to_Island")]
+```{r dmps-tabela}
+# ============================================================
+# Betas alinhados aos CpGs testados
+# ============================================================
+
+betas_dmp <- betas_col[rownames(M_col), ]
+
+
+# ============================================================
+# Média de beta por grupo
+# ============================================================
+
+gmeans <- sapply(
+  levels(targetsFlt$Group),
+  function(g) {
+    rowMeans(
+      betas_dmp[
+        ,
+        targetsFlt$Barcode[targetsFlt$Group == g],
+        drop = FALSE
+      ],
+      na.rm = TRUE
+    )
+  }
+)
+
+
+# ============================================================
+# Média de beta de todos os indivíduos MDS
+# MDS = MDS_HIGH + MDS_LOW
+# ============================================================
+
+mds_samples <- targetsFlt$Barcode[
+  targetsFlt$Group %in% c("MDS_HIGH", "MDS_LOW")
+]
+
+mds_mean <- rowMeans(
+  betas_dmp[
+    ,
+    mds_samples,
+    drop = FALSE
+  ],
+  na.rm = TRUE
+)
+
+
+# ============================================================
+# Delta-beta
+#
+# AMLvsMDS   = AML - todos os MDS
+# AMLvsHIGH  = AML - MDS_HIGH
+# AMLvsLOW   = AML - MDS_LOW
+# LOWvsHIGH  = MDS_LOW - MDS_HIGH
+# ============================================================
+
+deltaBeta <- list(
+  AMLvsMDS =
+    gmeans[, "AML"] - mds_mean,
+
+  AMLvsHIGH =
+    gmeans[, "AML"] - gmeans[, "MDS_HIGH"],
+
+  AMLvsLOW =
+    gmeans[, "AML"] - gmeans[, "MDS_LOW"],
+
+  LOWvsHIGH =
+    gmeans[, "MDS_LOW"] - gmeans[, "MDS_HIGH"]
+)
+
+
+# ============================================================
+# Anotação dos CpGs
+# ============================================================
+
+ann_pfx <- annEPIC[
+  match(
+    rownames(M_col),
+    sub("_.*$", "", rownames(annEPIC))
+  ),
+  c(
+    "chr",
+    "pos",
+    "UCSC_RefGene_Name",
+    "UCSC_RefGene_Group",
+    "Relation_to_Island"
+  )
+]
+
 rownames(ann_pfx) <- rownames(M_col)
 
-extrair_dmp <- function(coef) {
-  tt <- topTable(fit2, coef = coef, number = Inf, adjust.method = "BH")
-  tt$CpG       <- rownames(tt)
+
+# ============================================================
+# Função para extrair DMPs
+# ============================================================
+
+extrair_dmp <- function(fit_object, coef) {
+
+  tt <- topTable(
+    fit_object,
+    coef = coef,
+    number = Inf,
+    adjust.method = "BH"
+  )
+
+  tt$CpG <- rownames(tt)
+
+  # Delta-beta correspondente ao contraste
   tt$deltaBeta <- deltaBeta[[coef]][rownames(tt)]
-  tt <- cbind(tt, ann_pfx[rownames(tt), ])
-  tt <- tt[, c("CpG","logFC","deltaBeta","P.Value","adj.P.Val",
-               "chr","pos","UCSC_RefGene_Name","UCSC_RefGene_Group","Relation_to_Island")]
-  salvar_tab(tt, paste0("05_DMPs_", coef))                 # TABELA COMPLETA (nominal)
-  # candidatos EXPLORATÓRIOS (limiares pré-especificados): P nominal < 0.001 e |deltaBeta| >= 0.10
-  # ATENÇÃO: não são achados confirmatórios (não passam FDR).
-  cand <- tt[!is.na(tt$deltaBeta) & tt$P.Value < 0.001 & abs(tt$deltaBeta) >= 0.10, ]
-  salvar_tab(cand, paste0("05_candidatos_", coef))
-  message(coef, " — DMPs FDR<0.05: ", sum(tt$adj.P.Val < 0.05, na.rm = TRUE),
-          " | candidatos exploratórios: ", nrow(cand))
+
+  # Adicionar anotação
+  tt <- cbind(
+    tt,
+    ann_pfx[rownames(tt), ]
+  )
+
+  # Organizar colunas
+  tt <- tt[
+    ,
+    c(
+      "CpG",
+      "logFC",
+      "deltaBeta",
+      "P.Value",
+      "adj.P.Val",
+      "chr",
+      "pos",
+      "UCSC_RefGene_Name",
+      "UCSC_RefGene_Group",
+      "Relation_to_Island"
+    )
+  ]
+
+  # ==========================================================
+  # Tabela completa
+  # ==========================================================
+
+  salvar_tab(
+    tt,
+    paste0("05_DMPs_", coef)
+  )
+
+  # ==========================================================
+  # Candidatos exploratórios
+  # P nominal < 0.001 e |deltaBeta| >= 0.10
+  # ==========================================================
+
+  cand <- tt[
+    !is.na(tt$deltaBeta) &
+      tt$P.Value < 0.001 &
+      abs(tt$deltaBeta) >= 0.10,
+    ,
+    drop = FALSE
+  ]
+
+  salvar_tab(
+    cand,
+    paste0("05_candidatos_", coef)
+  )
+
+  message(
+    coef,
+    " — DMPs FDR<0.05: ",
+    sum(tt$adj.P.Val < 0.05, na.rm = TRUE),
+    " | candidatos exploratórios: ",
+    nrow(cand)
+  )
+
   tt
 }
-dmp_AMLvsMDS  <- extrair_dmp("AMLvsMDS")
-dmp_AMLvsLOW  <- extrair_dmp("AMLvsLOW")
-dmp_HIGHvsLOW <- extrair_dmp("HIGHvsLOW")
+
+
+# ============================================================
+# Extração dos quatro contrastes
+# ============================================================
+
+# AML vs MDS (16 AML vs 22 MDS)
+dmp_AMLvsMDS <- extrair_dmp(
+  fit2_AML_MDS,
+  "AMLvsMDS"
+)
+
+# AML vs MDS_HIGH
+dmp_AMLvsHIGH <- extrair_dmp(
+  fit2_3groups,
+  "AMLvsHIGH"
+)
+
+# AML vs MDS_LOW
+dmp_AMLvsLOW <- extrair_dmp(
+  fit2_3groups,
+  "AMLvsLOW"
+)
+
+# MDS_LOW vs MDS_HIGH
+dmp_LOWvsHIGH <- extrair_dmp(
+  fit2_3groups,
+  "LOWvsHIGH"
+)
 ```
 
 ```{r diagnosticos}
 #| fig-cap: "Diagnósticos por contraste: histograma de p, QQ-plot e distribuição de |delta-beta|."
-dmps_lst <- list(AMLvsMDS = dmp_AMLvsMDS, AMLvsLOW = dmp_AMLvsLOW, HIGHvsLOW = dmp_HIGHvsLOW)
+
+dmps_lst <- list(
+  AMLvsMDS   = dmp_AMLvsMDS,
+  AMLvsHIGH  = dmp_AMLvsHIGH,
+  AMLvsLOW   = dmp_AMLvsLOW,
+  LOWvsHIGH  = dmp_LOWvsHIGH
+)
+
 for (nm in names(dmps_lst)) {
+
   tt <- dmps_lst[[nm]]
-  salvar_fig(ggplot(tt, aes(P.Value)) + geom_histogram(bins = 50, fill = "grey40") +
-    labs(title = paste("Histograma de p —", nm), x = "P.Value", y = "nº de CpGs") + theme_minimal(),
-    paste0("05b_phist_", nm))
-  obs <- -log10(sort(tt$P.Value)); esp <- -log10(ppoints(length(obs)))
-  salvar_fig(ggplot(data.frame(esp, obs), aes(esp, obs)) + geom_point(size=0.4, alpha=0.4) +
-    geom_abline(slope=1, intercept=0, color="red") +
-    labs(title=paste("QQ-plot —", nm), x="-log10(P) esperado", y="-log10(P) observado") + theme_minimal(),
-    paste0("05b_qq_", nm))
-  salvar_fig(ggplot(tt, aes(abs(deltaBeta))) + geom_histogram(bins=50, fill="grey40") +
-    geom_vline(xintercept=0.10, linetype="dashed", color="red") +
-    labs(title=paste("|delta-beta| —", nm), x="|delta-beta|", y="nº de CpGs") + theme_minimal(),
-    paste0("05b_deltabeta_", nm))
+
+  # ----------------------------------------------------------
+  # Histograma dos P-values
+  # ----------------------------------------------------------
+
+  salvar_fig(
+    ggplot(tt, aes(P.Value)) +
+      geom_histogram(
+        bins = 50,
+        fill = "grey40"
+      ) +
+      labs(
+        title = paste("Histograma de p —", nm),
+        x = "P.Value",
+        y = "nº de CpGs"
+      ) +
+      theme_minimal(),
+
+    paste0("05b_phist_", nm)
+  )
+
+
+  # ----------------------------------------------------------
+  # QQ-plot dos P-values
+  # ----------------------------------------------------------
+
+  obs <- -log10(sort(tt$P.Value))
+  esp <- -log10(ppoints(length(obs)))
+
+  salvar_fig(
+    ggplot(
+      data.frame(esp, obs),
+      aes(esp, obs)
+    ) +
+      geom_point(
+        size = 0.4,
+        alpha = 0.4
+      ) +
+      geom_abline(
+        slope = 1,
+        intercept = 0,
+        color = "red"
+      ) +
+      labs(
+        title = paste("QQ-plot —", nm),
+        x = "-log10(P) esperado",
+        y = "-log10(P) observado"
+      ) +
+      theme_minimal(),
+
+    paste0("05b_qq_", nm)
+  )
+
+
+  # ----------------------------------------------------------
+  # Distribuição do |delta-beta|
+  # ----------------------------------------------------------
+
+  salvar_fig(
+    ggplot(
+      tt,
+      aes(abs(deltaBeta))
+    ) +
+      geom_histogram(
+        bins = 50,
+        fill = "grey40"
+      ) +
+      geom_vline(
+        xintercept = 0.10,
+        linetype = "dashed",
+        color = "red"
+      ) +
+      labs(
+        title = paste("|delta-beta| —", nm),
+        x = "|delta-beta|",
+        y = "nº de CpGs"
+      ) +
+      theme_minimal(),
+
+    paste0("05b_deltabeta_", nm)
+  )
 }
 ```
 
 ```{r volcano}
-#| fig-cap: "Volcano plots dos dois contrastes (vermelho: adj.P.Val < 0.05)."
+#| fig-cap: "Volcano plots dos quatro contrastes (vermelho: adj.P.Val < 0.05)."
+
 volcano <- function(tt, titulo) {
-  tt$sig <- ifelse(tt$adj.P.Val < 0.05, "FDR<0.05", "n.s.")
-  ggplot(tt, aes(logFC, -log10(P.Value), color = sig)) +
-    geom_point(size = 0.6, alpha = 0.5) +
-    scale_color_manual(values = c("FDR<0.05" = "red", "n.s." = "grey70")) +
-    labs(x = "logFC (M-value)", y = "-log10(P)", title = titulo, color = NULL) +
+
+  tt$sig <- ifelse(
+    tt$adj.P.Val < 0.05,
+    "FDR<0.05",
+    "n.s."
+  )
+
+  ggplot(
+    tt,
+    aes(
+      logFC,
+      -log10(P.Value),
+      color = sig
+    )
+  ) +
+    geom_point(
+      size = 0.6,
+      alpha = 0.5
+    ) +
+    scale_color_manual(
+      values = c(
+        "FDR<0.05" = "red",
+        "n.s." = "grey70"
+      )
+    ) +
+    labs(
+      x = "logFC (M-value)",
+      y = "-log10(P)",
+      title = titulo,
+      color = NULL
+    ) +
     theme_minimal()
 }
-salvar_fig(volcano(dmp_AMLvsMDS, "AML vs MDS"),        "05_volcano_AMLvsMDS")
-salvar_fig(volcano(dmp_AMLvsLOW, "AML vs MDS baixo"),  "05_volcano_AMLvsLOW")
-salvar_fig(volcano(dmp_HIGHvsLOW,"MDS alto vs baixo"), "05_volcano_HIGHvsLOW")
+
+
+# AML vs MDS
+salvar_fig(
+  volcano(
+    dmp_AMLvsMDS,
+    "AML vs MDS"
+  ),
+  "05_volcano_AMLvsMDS"
+)
+
+
+# AML vs MDS HIGH
+salvar_fig(
+  volcano(
+    dmp_AMLvsHIGH,
+    "AML vs MDS HIGH"
+  ),
+  "05_volcano_AMLvsHIGH"
+)
+
+
+# AML vs MDS LOW
+salvar_fig(
+  volcano(
+    dmp_AMLvsLOW,
+    "AML vs MDS LOW"
+  ),
+  "05_volcano_AMLvsLOW"
+)
+
+
+# MDS LOW vs MDS HIGH
+salvar_fig(
+  volcano(
+    dmp_LOWvsHIGH,
+    "MDS LOW vs MDS HIGH"
+  ),
+  "05_volcano_LOWvsHIGH"
+)
 ```
 
 ## Metilação por região genômica
@@ -367,9 +734,9 @@ inteiro vs entre os CpGs de maior sinal do estudo (top-1000 de AML vs MDS-baixo)
 estilo do artigo de referência.
 
 ```{r regiao-map}
-betas_final <- betas_col[rownames(M_col), ]                 # betas colapsados (final DMP)
+betas_final <- betas_col[rownames(M_col), ]# betas colapsados (final DMP)
 prefix <- rownames(betas_final)
-idx    <- match(prefix, sub("_.*$", "", rownames(annEPIC))) # 1a ocorrência por CpG
+idx    <- match(prefix, sub("_.*$", "", rownames(annEPIC))) #1a ocorrência por CpG
 
 # grupo gênico -> categoria
 gg <- sub(";.*$", "", annEPIC$UCSC_RefGene_Group[idx])
@@ -418,28 +785,76 @@ salvar_fig(g2, "06_pct_metilada_ilha")
 ```
 
 ```{r regiao-array-vs-estudo}
-#| fig-cap: "Distribuição das regiões: array (todos os CpGs) vs top-1000 do estudo (AML vs MDS-baixo)."
-top_cpgs <- rownames(topTable(fit2, coef="AMLvsLOW", number=1000, sort.by="P"))
-is_top   <- prefix %in% top_cpgs
-dist_df <- function(cat, lab, sel=rep(TRUE,length(cat))) {
-  tb <- prop.table(table(cat[sel]))*100
-  data.frame(Regiao=names(tb), Pct=as.numeric(tb), Conjunto=lab)
+#| fig-cap: "Distribuição das regiões: array (todos os CpGs) vs top-1000 do estudo (AML vs MDS)."
+
+top_cpgs <- rownames(
+  topTable(
+    fit2_AML_MDS,
+    coef = "AMLvsMDS",
+    number = 1000,
+    sort.by = "P"
+  )
+)
+
+is_top <- prefix %in% top_cpgs
+
+dist_df <- function(cat, lab, sel = rep(TRUE, length(cat))) {
+
+  tb <- prop.table(
+    table(cat[sel])
+  ) * 100
+
+  data.frame(
+    Regiao = names(tb),
+    Pct = as.numeric(tb),
+    Conjunto = lab
+  )
 }
-comp <- rbind(dist_df(reg_gene, "Array (todos)"),
-              dist_df(reg_gene, "Estudo (top-1000)", is_top))
-comp$Regiao <- factor(comp$Regiao, levels=c("Promotor","5'UTR","Corpo do gene","3'UTR","Intergênico"))
-salvar_tab(comp, "06_distribuicao_array_vs_estudo")
-g3 <- ggplot(comp, aes(Regiao, Pct, fill=Conjunto)) +
-  geom_col(position=position_dodge()) +
-  labs(x=NULL, y="% das sondas", fill=NULL,
-       title="Distribuição por região: array vs estudo") + theme_minimal()
-salvar_fig(g3, "06_distribuicao_array_vs_estudo")
+
+comp <- rbind(
+  dist_df(reg_gene, "Array (todos)"),
+  dist_df(reg_gene, "Estudo (top-1000)", is_top)
+)
+
+comp$Regiao <- factor(
+  comp$Regiao,
+  levels = c(
+    "Promotor",
+    "5'UTR",
+    "Corpo do gene",
+    "3'UTR",
+    "Intergênico"
+  )
+)
+
+salvar_tab(
+  comp,
+  "06_distribuicao_array_vs_estudo"
+)
+
+g3 <- ggplot(
+  comp,
+  aes(Regiao, Pct, fill = Conjunto)
+) +
+  geom_col(position = position_dodge()) +
+  labs(
+    x = NULL,
+    y = "% das sondas",
+    fill = NULL,
+    title = "Distribuição por região: array vs estudo"
+  ) +
+  theme_minimal()
+
+salvar_fig(
+  g3,
+  "06_distribuicao_array_vs_estudo"
+)
 ```
+
 
 ## Análise exploratória não supervisionada
 
-Heatmap e clustering hierárquico das sondas mais variáveis, para ver se emergem
-agrupamentos moleculares independentes dos rótulos clínicos.
+Heatmap e clustering hierárquico das sondas mais variáveis, para ver se emergem agrupamentos moleculares independentes dos rótulos clínicos.
 
 ```{r unsup-heatmap}
 #| fig-cap: "Heatmap das 2000 sondas mais variáveis (M-value, centrado por sonda)."
@@ -474,6 +889,7 @@ dev.off()
 plot(hc, labels=rot, main="Clustering hierárquico (Ward)", xlab="", sub="")
 ```
 
+
 ## Variáveis clínicas: PCA e clusters
 
 ```{r pca-clinica}
@@ -485,6 +901,7 @@ g <- ggplot(pcs_df, aes(PC1, PC2, color = Blasto, shape = Grupo)) +
   labs(title = "PCA colorido por % de blastos", color = "% blastos") + theme_minimal()
 salvar_fig(g, "09_pca_por_blasto")
 ```
+
 
 ```{r clusters-clinica}
 # define k clusters a partir do dendrograma e associa às variáveis clínicas
@@ -513,32 +930,117 @@ salvar_tab(res, "09_clusters_vs_clinica")
 res
 ```
 
+
 ## DMRs (DMRcate)
 
 ```{r dmrs}
-# usa a matriz NÃO colapsada, sem SNP/CH/XY; cpg.annotate colapsa (epicv2Filter="mean")
-M_dmr <- M_auto[is.finite(rowSums(M_auto)), ]
-# fdr = corte de CpG que "semeia" as regiões. 0.05 e rigoroso; para uma passada
-# EXPLORATORIA com n pequeno, pode-se elevar (ex.: rodar_dmr("AMLvsMDS", fdr = 0.1)).
-rodar_dmr <- function(coef, fdr = 0.05) {
-  ann <- cpg.annotate("array", M_dmr, what = "M", arraytype = "EPICv2",
-                      epicv2Filter = "mean", analysis.type = "differential",
-                      design = design, contrasts = TRUE, cont.matrix = cont,
-                      coef = coef, fdr = fdr)
+#| fig-cap: "Análise de regiões diferencialmente metiladas (DMRs) com DMRcate."
+
+# Matriz usada na análise de DMRs
+M_dmr <- M_auto[
+  is.finite(rowSums(M_auto)),
+]
+
+
+rodar_dmr <- function(
+    coef,
+    design_obj,
+    contrast_obj,
+    fdr = 0.05) {
+
+  ann <- cpg.annotate(
+    "array",
+    M_dmr,
+    what = "M",
+    arraytype = "EPICv2",
+    epicv2Filter = "mean",
+    analysis.type = "differential",
+    design = design_obj,
+    contrasts = TRUE,
+    cont.matrix = contrast_obj,
+    coef = coef,
+    fdr = fdr
+  )
+
   rng <- tryCatch(
-    extractRanges(dmrcate(ann, lambda = 1000, C = 2), genome = "hg38"),
+
+    extractRanges(
+      dmrcate(
+        ann,
+        lambda = 1000,
+        C = 2
+      ),
+      genome = "hg38"
+    ),
+
     error = function(e) {
-      message(coef, " — nenhum DMR (nenhum CpG significativo em fdr=", fdr, ").")
+
+      message(
+        coef,
+        " — nenhum DMR (nenhum CpG significativo em fdr=",
+        fdr,
+        ")."
+      )
+
       GenomicRanges::GRanges()
-    })
-  if (length(rng)) salvar_tab(as.data.frame(rng), paste0("07_DMRs_", coef))
-  message(coef, " — DMRs: ", length(rng))
-  list(ann = ann, rng = rng)
+    }
+  )
+
+  if (length(rng)) {
+    salvar_tab(
+      as.data.frame(rng),
+      paste0("07_DMRs_", coef)
+    )
+  }
+
+  message(
+    coef,
+    " — DMRs: ",
+    length(rng)
+  )
+
+  list(
+    ann = ann,
+    rng = rng
+  )
 }
-dmr_AMLvsMDS  <- rodar_dmr("AMLvsMDS")
-dmr_AMLvsLOW  <- rodar_dmr("AMLvsLOW")
-dmr_HIGHvsLOW <- rodar_dmr("HIGHvsLOW")
+
+
+# ============================================================
+# AML vs MDS
+# MDS = todos os indivíduos MDS
+# ============================================================
+
+dmr_AMLvsMDS <- rodar_dmr(
+  "AMLvsMDS",
+  design_AML_MDS,
+  cont_AML_MDS
+)
+
+
+# ============================================================
+# Comparações específicas
+# ============================================================
+
+dmr_AMLvsHIGH <- rodar_dmr(
+  "AMLvsHIGH",
+  design_3groups,
+  cont_3groups
+)
+
+dmr_AMLvsLOW <- rodar_dmr(
+  "AMLvsLOW",
+  design_3groups,
+  cont_3groups
+)
+
+dmr_LOWvsHIGH <- rodar_dmr(
+  "LOWvsHIGH",
+  design_3groups,
+  cont_3groups
+) 
 ```
+
 
 ## Análises de sensibilidade e diagnósticas
 
@@ -553,6 +1055,7 @@ salvar_tab(data.frame(cramerV = round(cramer,3), p_chisq = signif(chi$p.value,3)
 cat("Cramér's V (grupo x chip):", round(cramer,3), "| p:", signif(chi$p.value,3), "\n")
 ```
 
+
 ```{r mds-lote}
 #| fig-cap: "MDS colorido por grupo e com forma por chip (lote)."
 mds <- plotMDS(M_col, top=1000, gene.selection="common", plot=FALSE)
@@ -562,6 +1065,7 @@ g <- ggplot(dfm, aes(x, y, color=Grupo, shape=Chip)) + geom_point(size=3) +
   labs(x="Dim 1", y="Dim 2", title="MDS: cor = grupo, forma = chip") + theme_minimal()
 salvar_fig(g, "10_mds_grupo_e_lote")
 ```
+
 
 ```{r top-nominal-lote}
 # os CpGs nominais mais fortes (AMLvsLOW) são dominados por um chip?
@@ -574,23 +1078,118 @@ cat("Top-50 CpGs nominais: R2 do PC1 ~ chip =",
 ### Sensibilidade: com e sem os outliers (12 e 26)
 
 ```{r sens-outliers}
-# Refit incluindo 12 e 26 (mesmos filtros/design), só para contagem comparativa de DMPs.
-bc  <- betas_norm[, boas]                      # 'boas' = detecção OK (inclui 12 e 26)
-tg  <- targets[match(colnames(bc), targets$Barcode), ]
-Grp <- tg$Group; Sx <- droplevels(factor(tg$Sex)); Ch <- droplevels(factor(tg$Sentrix_ID))
-bc  <- bc[rowMeans(is.na(bc)) <= 0.05, ]
-Mx  <- rmSNPandCH(minfi::logit2(bc), rmcrosshyb = TRUE)
-Mx  <- Mx[!(rownames(Mx) %in% sondas_xy), ]
-bx  <- betasCollapseToPfx(bc[rownames(Mx), ]); Mcx <- minfi::logit2(bx)
-Mcx <- Mcx[is.finite(rowSums(Mcx)), ]
-Dx  <- model.matrix(~ 0 + Grp + Sx + Ch); colnames(Dx) <- make.names(colnames(Dx))
-Cx  <- makeContrasts(AMLvsLOW = GrpAML - GrpMDS_LOW, levels = Dx)
-fx  <- eBayes(contrasts.fit(lmFit(Mcx, Dx), Cx))
-cat("SEM remover outliers: n =", ncol(Mcx), "| DMPs FDR<0.05 (AMLvsLOW) =",
-    sum(decideTests(fx, p.value=0.05) != 0), "\n")
-cat("COM remoção (principal): DMPs FDR<0.05 (AMLvsLOW) =",
-    sum(dmp_AMLvsLOW$adj.P.Val < 0.05, na.rm = TRUE), "\n")
+#| fig-cap: "Análise de sensibilidade para avaliar o efeito da inclusão dos outliers."
+
+# Refit incluindo as amostras 12 e 26
+# 'boas' = amostras aprovadas no controle de qualidade,
+# incluindo os dois outliers identificados.
+
+bc <- betas_norm[, boas]
+
+tg <- targets[
+  match(
+    colnames(bc),
+    targets$Barcode
+  ),
+]
+
+# Colapsar AML vs MDS
+# MDS = MDS_HIGH + MDS_LOW
+Grp <- factor(
+  ifelse(
+    tg$Group == "AML",
+    "AML",
+    "MDS"
+  ),
+  levels = c("AML", "MDS")
+)
+
+Sx <- droplevels(
+  factor(tg$Sex)
+)
+
+Ch <- droplevels(
+  factor(tg$Sentrix_ID)
+)
+
+# Remover CpGs com >5% de NA
+bc <- bc[
+  rowMeans(is.na(bc)) <= 0.05,
+]
+
+# Transformação para M-values
+Mx <- rmSNPandCH(
+  minfi::logit2(bc),
+  rmcrosshyb = TRUE
+)
+
+# Remover cromossomos sexuais
+Mx <- Mx[
+  !(rownames(Mx) %in% sondas_xy),
+]
+
+# Colapsar probes para prefixo CpG
+bx <- betasCollapseToPfx(
+  bc[rownames(Mx), ]
+)
+
+Mcx <- minfi::logit2(bx)
+
+# Manter apenas linhas finitas
+Mcx <- Mcx[
+  is.finite(rowSums(Mcx)),
+]
+
+# Modelo AML vs MDS
+Dx <- model.matrix(
+  ~ 0 + Grp + Sx + Ch
+)
+
+colnames(Dx) <- make.names(
+  colnames(Dx)
+)
+
+Cx <- makeContrasts(
+  AMLvsMDS = GrpAML - GrpMDS,
+  levels = Dx
+)
+
+# Ajuste limma
+fx <- eBayes(
+  contrasts.fit(
+    lmFit(Mcx, Dx),
+    Cx
+  )
+)
+
+# Número de DMPs
+n_dmp_sens <- sum(
+  decideTests(
+    fx,
+    p.value = 0.05
+  ) != 0
+)
+
+n_dmp_principal <- sum(
+  dmp_AMLvsMDS$adj.P.Val < 0.05,
+  na.rm = TRUE
+)
+
+cat(
+  "SEM remover outliers: n =",
+  ncol(Mcx),
+  "| DMPs FDR<0.05 (AMLvsMDS) =",
+  n_dmp_sens,
+  "\n"
+)
+
+cat(
+  "COM remoção dos outliers (análise principal): DMPs FDR<0.05 (AMLvsMDS) =",
+  n_dmp_principal,
+  "\n"
+)
 ```
+
 
 ### Sensibilidade: modelo secundário com blastos como covariável
 
@@ -622,8 +1221,11 @@ if (requireNamespace("EpiDISH", quietly = TRUE)) {
 } else message("Instale EpiDISH para estimar composição celular: BiocManager::install('EpiDISH')")
 ```
 
+
 ## Informação da sessão
 
 ```{r sessioninfo}
+
 sessionInfo()
+
 ```
