@@ -1,6 +1,6 @@
 # metiloma-smd-aml
 
-Pipeline reprodutível de análise de metilação de DNA (Illumina Infinium MethylationEPIC v2.0, EPICv2, hg38) comparando **leucemia mieloide aguda (AML)** e **síndrome mielodisplásica (MDS)** de alto e baixo risco, em medula óssea.
+Pipeline reprodutível de análise de metilação de DNA (Illumina Infinium MethylationEPIC v2.0, EPICv2, hg38) comparando **leucemia mieloide aguda (AML)** e **neoplasia mielodisplásica (MDS)** de alto e baixo risco, em medula óssea.
 
 ## Objetivo
 Explorar diferenças de metilação (DMPs e DMRs) entre AML e MDS e caracterizar as fontes de variação. Dado o tamanho amostral pequeno, o estudo é **exploratório e gerador de hipóteses**, não confirmatório.
