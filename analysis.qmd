@@ -1222,6 +1222,95 @@ if (requireNamespace("EpiDISH", quietly = TRUE)) {
 ```
 
 
+## Subtipos moleculares: consenso, caracterização e vias
+
+Instalação (só instala o que faltar; se já houver, é no-op) e carregamento dos pacotes,
+antes das análises, para não quebrar o código.
+
+```{r pkgs-subtipos}
+if (!requireNamespace("ConsensusClusterPlus", quietly = TRUE))
+  BiocManager::install("ConsensusClusterPlus", ask = FALSE, update = FALSE)
+suppressPackageStartupMessages(library(ConsensusClusterPlus))
+```
+
+### Clustering por consenso (define nº e estabilidade de subtipos)
+
+Reamostra as sondas mais variáveis muitas vezes e mede quão consistentemente cada par de
+amostras fica junto — determina de forma robusta quantos subtipos os dados suportam
+(Jian et al., 2023; método de consenso de Monti et al., 2003).
+
+```{r consensus}
+vary    <- apply(M_col, 1, var)
+top_var <- names(sort(vary, decreasing = TRUE))[1:2000]
+mat_cc  <- sweep(as.matrix(M_col[top_var, ]), 1, rowMeans(as.matrix(M_col[top_var, ])))
+
+set.seed(1234)
+cc <- ConsensusClusterPlus(
+  mat_cc, maxK = 6, reps = 1000, pItem = 0.8, pFeature = 1,
+  clusterAlg = "hc", distance = "pearson",
+  innerLinkage = "ward.D2", finalLinkage = "ward.D2",
+  seed = 1234, plot = "pdf", title = "output/figuras/consensus")
+
+k_cc   <- 3                                   # ajuste conforme o gráfico de consenso (delta area)
+cc_lab <- cc[[k_cc]]$consensusClass
+targetsFlt$ClusterCC <- factor(cc_lab[match(targetsFlt$Barcode, names(cc_lab))])
+salvar_tab(data.frame(Barcode = names(cc_lab), ClusterCC = cc_lab), "11_consensus_clusters")
+print(table(ClusterCC = targetsFlt$ClusterCC, Grupo = targetsFlt$Group))
+```
+
+### Clusters de consenso × variáveis clínicas
+
+```{r cc-clinica}
+num_v <- c("Blast_pct","Age","Hemoglobin","Platelets","Segmented_neutrophils")
+cat_v <- c("Group","Sex","Karyotype_status","Karyotype_Complex","Cellularity",
+           "Transfusion_dependence","Death","Loss_of_Y")
+res <- data.frame(Variavel=character(), Teste=character(), p=numeric())
+for (v in num_v) { x <- targetsFlt[[v]]; ok <- !is.na(x)
+  if (length(unique(targetsFlt$ClusterCC[ok])) > 1)
+    res <- rbind(res, data.frame(Variavel=v, Teste="Kruskal",
+      p=kruskal.test(x[ok] ~ targetsFlt$ClusterCC[ok])$p.value)) }
+for (v in cat_v) { x <- factor(targetsFlt[[v]]); ok <- !is.na(x)
+  tb <- table(x[ok], targetsFlt$ClusterCC[ok])
+  if (nrow(tb) > 1 && ncol(tb) > 1)
+    res <- rbind(res, data.frame(Variavel=v, Teste="Fisher",
+      p=fisher.test(tb, simulate.p.value=TRUE)$p.value)) }
+res$p <- round(res$p, 4); res <- res[order(res$p), ]
+salvar_tab(res, "11_consensusCluster_vs_clinica")
+res
+```
+
+### Caracterização: CpGs que definem cada cluster + vias enriquecidas
+
+Cada cluster é comparado (limma) contra a média dos demais, no genoma todo (reduz a
+circularidade de os clusters terem sido definidos por sondas variáveis). Os genes dos
+CpGs mais fortes são testados por enriquecimento (GO/KEGG/Reactome).
+
+```{r cc-caracterizacao}
+des_cc <- model.matrix(~ 0 + ClusterCC, data = targetsFlt)
+colnames(des_cc) <- paste0("C", levels(targetsFlt$ClusterCC))
+fit_cc <- lmFit(M_col, des_cc)
+
+genes_de <- function(cpgs) {
+  g <- annEPIC$UCSC_RefGene_Name[match(cpgs, sub("_.*$", "", rownames(annEPIC)))]
+  unique(unlist(strsplit(g[!is.na(g) & g != ""], ";")))
+}
+
+for (cl in levels(targetsFlt$ClusterCC)) {
+  outros <- setdiff(colnames(des_cc), paste0("C", cl))
+  form   <- paste0("C", cl, " - (", paste(outros, collapse = " + "), ")/", length(outros))
+  ct     <- makeContrasts(contrasts = form, levels = des_cc)
+  f2     <- eBayes(contrasts.fit(fit_cc, ct))
+  tt     <- topTable(f2, number = Inf, adjust.method = "BH")
+  salvar_tab(head(tt[order(tt$P.Value), ], 1000), paste0("11_clusterC", cl, "_topCpGs"))
+  # Lista de genes dos CpGs definidores — para enriquecimento EXTERNO (copie o CSV).
+  sig_cpg <- rownames(tt)[which(tt$adj.P.Val < 0.05)]
+  if (length(sig_cpg) < 20) sig_cpg <- head(rownames(tt)[order(tt$P.Value)], 500)
+  genes <- genes_de(sig_cpg)
+  salvar_tab(data.frame(Gene = genes), paste0("11_clusterC", cl, "_genes"))
+  message("Cluster ", cl, " — CpGs sig: ", length(sig_cpg), " | genes únicos: ", length(genes))
+}
+```
+
 ## Informação da sessão
 
 ```{r sessioninfo}
