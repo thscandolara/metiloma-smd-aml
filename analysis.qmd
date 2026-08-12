@@ -740,11 +740,11 @@ idx    <- match(prefix, sub("_.*$", "", rownames(annEPIC))) #1a ocorrência por 
 
 # grupo gênico -> categoria
 gg <- sub(";.*$", "", annEPIC$UCSC_RefGene_Group[idx])
-reg_gene <- rep("Intergênico", length(gg))
-reg_gene[gg %in% c("TSS200","TSS1500","1stExon")] <- "Promotor"
-reg_gene[gg == "5'UTR"]   <- "5'UTR"
-reg_gene[gg %in% c("Body","ExonBnd")] <- "Corpo do gene"
-reg_gene[gg == "3'UTR"]   <- "3'UTR"
+reg_gene <- rep("Intergênico", length(gg))                      # "" = intergênico
+reg_gene[grepl("^TSS|promot", gg, ignore.case = TRUE)]         <- "Promotor"
+reg_gene[gg %in% c("5UTR", "5'UTR")]                           <- "5'UTR"
+reg_gene[gg %in% c("3UTR", "3'UTR")]                           <- "3'UTR"
+reg_gene[grepl("^exon|^intron|^Body", gg, ignore.case = TRUE)] <- "Corpo do gene"
 
 # relação com ilha CpG
 reg_ilha <- as.character(annEPIC$Relation_to_Island[idx])
@@ -773,7 +773,7 @@ g1 <- ggplot(dfg, aes(Regiao, Pct, fill=Doenca)) +
 salvar_fig(g1, "06_pct_metilada_grupo_genico")
 
 dfi <- pct_met(reg_ilha)
-dfi$Regiao <- factor(dfi$Regiao, levels=c("Island","N_Shore","S_Shore","N_Shelf","S_Shelf","OpenSea"))
+dfi$Regiao <- factor(dfi$Regiao, levels=c("Island","Shore","Shelf","OpenSea"))
 salvar_tab(dfi, "06_pct_metilada_ilha")
 g2 <- ggplot(dfi, aes(Regiao, Pct, fill=Doenca)) +
   geom_col(position=position_dodge()) +
