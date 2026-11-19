@@ -19,3 +19,11 @@ pdata_pronon.csv
 # --- Sistema ---
 .DS_Store
 Thumbs.db
+
+# --- Reanálise com banco do REDCap e painel NGS (dados clínicos e saídas: NUNCA versionar) ---
+*.xlsx
+*.maf
+pdata_pronon_REDCap_PT.csv
+CHECAGEM_*.csv
+saida_clinica_REDCap/
+Figuras_MAF*/
